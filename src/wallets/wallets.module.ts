@@ -10,6 +10,7 @@ import { Transfer, TransferSchema } from './schemas/transfer.schema';
 import { Wallet, WalletSchema } from './schemas/wallet.schema';
 import { WalletsController } from './wallets.controller';
 import { WalletsService } from './wallets.service';
+import { WalletOwnerGuard } from './guards/wallet-owner.guard';
 
 @Module({
   imports: [
@@ -25,7 +26,7 @@ import { WalletsService } from './wallets.service';
     TransactionsModule,
   ],
   controllers: [WalletsController],
-  providers: [WalletsService],
+  providers: [WalletsService, WalletOwnerGuard],
   exports: [WalletsService],
 })
 export class WalletsModule {}

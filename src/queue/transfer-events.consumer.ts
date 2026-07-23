@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { ConsumeMessage } from 'amqplib';
 import { Model } from 'mongoose';
 import { LedgerService } from '../ledger/ledger.service';
+import { RedisService } from '../redis/redis.service';
 import {
   Transaction,
   TransactionDocument,
@@ -31,6 +32,7 @@ export class TransferEventsConsumer implements OnModuleInit {
     @InjectModel(Transaction.name)
     private readonly transactionModel: Model<TransactionDocument>,
     private readonly ledgerService: LedgerService,
+    private readonly redisService: RedisService,
   ) {}
 
   onModuleInit() {
@@ -53,7 +55,7 @@ export class TransferEventsConsumer implements OnModuleInit {
       channel.ack(message);
     } catch (error) {
       this.logger.error(`Failed to process transfer event: ${(error as Error).message}`);
-      channel.ack(message);
+      channel.nack(message, false, false);
     }
   }
 
@@ -61,6 +63,11 @@ export class TransferEventsConsumer implements OnModuleInit {
     const transfer = await this.transferModel.findById(event.transferId);
     if (!transfer) {
       this.logger.warn(`Transfer ${event.transferId} not found, skipping`);
+      return;
+    }
+
+    if (transfer.status === TransferStatus.COMPLETED) {
+      this.logger.warn(`Transfer ${event.transferId} already completed, skipping (idempotent)`);
       return;
     }
 
@@ -94,6 +101,8 @@ export class TransferEventsConsumer implements OnModuleInit {
 
     transfer.status = TransferStatus.COMPLETED;
     await transfer.save();
+
+    await this.redisService.invalidateBalance(event.toWalletId);
 
     this.logger.log(`Transfer ${transfer.id} completed for wallet ${toWallet.id}`);
   }

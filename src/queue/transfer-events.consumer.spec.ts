@@ -2,6 +2,7 @@ import { getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Types } from 'mongoose';
 import { LedgerService } from '../ledger/ledger.service';
+import { RedisService } from '../redis/redis.service';
 import { Transaction, TransactionType } from '../transactions/schemas/transaction.schema';
 import { Transfer, TransferStatus } from '../wallets/schemas/transfer.schema';
 import { Wallet } from '../wallets/schemas/wallet.schema';
@@ -32,10 +33,30 @@ describe('TransferEventsConsumer', () => {
         { provide: getModelToken(Wallet.name), useValue: walletModel },
         { provide: getModelToken(Transaction.name), useValue: transactionModel },
         { provide: LedgerService, useValue: ledgerService },
+        { provide: RedisService, useValue: { invalidateBalance: jest.fn() } },
       ],
     }).compile();
 
     consumer = module.get(TransferEventsConsumer);
+  });
+
+  it('skips processing when the transfer is already completed (idempotency guard)', async () => {
+    const transfer = {
+      _id: new Types.ObjectId(),
+      id: 'transfer-1',
+      status: TransferStatus.COMPLETED,
+    };
+    transferModel.findById.mockResolvedValue(transfer);
+
+    await (consumer as any).completeTransfer({
+      transferId: transfer._id.toString(),
+      fromWalletId: 'wallet-1',
+      toWalletId: 'wallet-2',
+      amount: 25,
+    });
+
+    expect(walletModel.findById).not.toHaveBeenCalled();
+    expect(transactionModel.create).not.toHaveBeenCalled();
   });
 
   it('credits the destination wallet and marks the transfer completed', async () => {

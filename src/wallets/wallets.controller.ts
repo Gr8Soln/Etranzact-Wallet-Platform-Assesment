@@ -1,13 +1,15 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { DepositDto } from './dto/deposit.dto';
 import { TransferDto } from './dto/transfer.dto';
 import { WithdrawDto } from './dto/withdraw.dto';
+import { WalletOwnerGuard } from './guards/wallet-owner.guard';
 import { WalletsService } from './wallets.service';
 
 @ApiTags('wallets')
 @Controller('wallets')
+@UseGuards(WalletOwnerGuard)
 export class WalletsController {
   constructor(private readonly walletsService: WalletsService) {}
 
