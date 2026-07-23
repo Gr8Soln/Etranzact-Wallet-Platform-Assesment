@@ -287,7 +287,7 @@ describe('WalletsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('debits the sender, records a ledger entry, and publishes a transfer.initiated event', async () => {
+    it('debits the sender, records a ledger entry, and enqueues a transfer.initiated outbox event', async () => {
       const { fromWallet } = mockWallets(100);
       const createdTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
       transferModel.create.mockResolvedValue([createdTransfer]);
@@ -308,17 +308,19 @@ describe('WalletsService', () => {
         70,
         mockSession,
       );
-      expect(rabbitMQService.publish).toHaveBeenCalledWith(
+      expect(outboxService.enqueue).toHaveBeenCalledWith(
         'transfer.initiated',
         expect.objectContaining({ transferId: createdTransfer._id.toString(), amount: 30 }),
+        mockSession,
       );
       expect(result).toBe(createdTransfer);
     });
 
-    it('does not create a second transfer when retried with the same idempotency key', async () => {
+    it('returns the existing transfer when retried with the same idempotency key', async () => {
       mockWallets(100);
-      const createdTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
-      transferModel.create.mockResolvedValue([createdTransfer]);
+      const existingTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
+      transferModel.findOne.mockResolvedValue(null);
+      transferModel.create.mockResolvedValue([{ _id: new Types.ObjectId(), status: 'PENDING' }]);
       transactionModel.create.mockResolvedValue([{ _id: new Types.ObjectId() }]);
 
       const dto = {
@@ -328,10 +330,15 @@ describe('WalletsService', () => {
         idempotencyKey: 'retry-key-1',
       };
 
-      await service.transfer(dto);
+      // First call: no existing transfer, creates one
       await service.transfer(dto);
 
+      // Second call: findOne returns existing, skips creation
+      transferModel.findOne.mockResolvedValue(existingTransfer);
+      const result = await service.transfer(dto);
+
       expect(transferModel.create).toHaveBeenCalledTimes(1);
+      expect(result).toBe(existingTransfer);
     });
 
     it('ends the Mongo session even when the transaction fails partway through', async () => {
@@ -349,7 +356,7 @@ describe('WalletsService', () => {
       ).rejects.toThrow('write conflict');
 
       expect(mockSession.endSession).toHaveBeenCalled();
-      expect(rabbitMQService.publish).not.toHaveBeenCalled();
+      expect(outboxService.enqueue).not.toHaveBeenCalled();
     });
   });
 });

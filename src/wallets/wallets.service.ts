@@ -159,6 +159,13 @@ export class WalletsService {
       throw new BadRequestException('Insufficient balance');
     }
 
+    if (dto.idempotencyKey) {
+      const existing = await this.transferModel.findOne({ idempotencyKey: dto.idempotencyKey });
+      if (existing) {
+        return existing;
+      }
+    }
+
     const session = await this.connection.startSession();
     let transfer!: TransferDocument;
 
@@ -203,12 +210,16 @@ export class WalletsService {
           session,
         );
 
-        await this.rabbitMQService.publish('transfer.initiated', {
-          transferId: transfer._id.toString(),
-          fromWalletId: fromWallet._id.toString(),
-          toWalletId: toWallet._id.toString(),
-          amount: dto.amount,
-        });
+        await this.outboxService.enqueue(
+          'transfer.initiated',
+          {
+            transferId: transfer._id.toString(),
+            fromWalletId: fromWallet._id.toString(),
+            toWalletId: toWallet._id.toString(),
+            amount: dto.amount,
+          },
+          session,
+        );
       });
     } finally {
       await session.endSession();
