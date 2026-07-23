@@ -86,73 +86,99 @@ export class WalletsService {
   }
 
   async deposit(id: string, dto: DepositDto) {
-    const wallet = await this.walletModel.findByIdAndUpdate(
-      id,
-      { $inc: { balance: dto.amount } },
-      { new: true },
-    );
+    const session = await this.connection.startSession();
 
-    if (!wallet) {
-      throw new NotFoundException(`Wallet ${id} not found`);
+    try {
+      let wallet!: WalletDocument;
+      let transaction!: TransactionDocument;
+
+      await session.withTransaction(async () => {
+        wallet = (await this.walletModel.findByIdAndUpdate(
+          id,
+          { $inc: { balance: dto.amount } },
+          { new: true, session },
+        ))!;
+
+        if (!wallet) {
+          throw new NotFoundException(`Wallet ${id} not found`);
+        }
+
+        transaction = await this.transactionsService.create({
+          walletId: wallet.id,
+          type: TransactionType.DEPOSIT,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+          reference: dto.reference,
+        }, session);
+
+        await this.ledgerService.recordCredit(
+          wallet._id, transaction._id, dto.amount, wallet.balance, session,
+        );
+
+        await this.outboxService.enqueue('wallet.deposited', {
+          walletId: wallet.id,
+          transactionId: transaction.id,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+        }, session);
+      });
+
+      await this.redisService.invalidateBalance(id);
+
+      return wallet;
+    } finally {
+      await session.endSession();
     }
-
-    const transaction = await this.transactionsService.create({
-      walletId: wallet.id,
-      type: TransactionType.DEPOSIT,
-      amount: dto.amount,
-      balanceAfter: wallet.balance,
-      reference: dto.reference,
-    });
-
-    await this.ledgerService.recordCredit(wallet._id, transaction._id, dto.amount, wallet.balance);
-
-    await this.outboxService.enqueue('wallet.deposited', {
-      walletId: wallet.id,
-      transactionId: transaction.id,
-      amount: dto.amount,
-      balanceAfter: wallet.balance,
-    });
-
-    await this.redisService.invalidateBalance(id);
-
-    return wallet;
   }
 
   async withdraw(id: string, dto: WithdrawDto) {
-    const wallet = await this.walletModel.findOneAndUpdate(
-      { _id: id, balance: { $gte: dto.amount } },
-      { $inc: { balance: -dto.amount } },
-      { new: true },
-    );
+    const session = await this.connection.startSession();
 
-    if (!wallet) {
-      const exists = await this.walletModel.findById(id);
-      if (!exists) {
-        throw new NotFoundException(`Wallet ${id} not found`);
-      }
-      throw new BadRequestException('Insufficient balance');
+    try {
+      let wallet!: WalletDocument;
+      let transaction!: TransactionDocument;
+
+      await session.withTransaction(async () => {
+        wallet = (await this.walletModel.findOneAndUpdate(
+          { _id: id, balance: { $gte: dto.amount } },
+          { $inc: { balance: -dto.amount } },
+          { new: true, session },
+        ))!;
+
+        if (!wallet) {
+          const exists = await this.walletModel.findById(id, null, { session });
+          if (!exists) {
+            throw new NotFoundException(`Wallet ${id} not found`);
+          }
+          throw new BadRequestException('Insufficient balance');
+        }
+
+        transaction = await this.transactionsService.create({
+          walletId: wallet.id,
+          type: TransactionType.WITHDRAWAL,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+          reference: dto.reference,
+        }, session);
+
+        await this.ledgerService.recordDebit(
+          wallet._id, transaction._id, dto.amount, wallet.balance, session,
+        );
+
+        await this.outboxService.enqueue('wallet.withdrawn', {
+          walletId: wallet.id,
+          transactionId: transaction.id,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+        }, session);
+      });
+
+      await this.redisService.invalidateBalance(id);
+
+      return wallet;
+    } finally {
+      await session.endSession();
     }
-
-    const transaction = await this.transactionsService.create({
-      walletId: wallet.id,
-      type: TransactionType.WITHDRAWAL,
-      amount: dto.amount,
-      balanceAfter: wallet.balance,
-      reference: dto.reference,
-    });
-
-    await this.ledgerService.recordDebit(wallet._id, transaction._id, dto.amount, wallet.balance);
-
-    await this.outboxService.enqueue('wallet.withdrawn', {
-      walletId: wallet.id,
-      transactionId: transaction.id,
-      amount: dto.amount,
-      balanceAfter: wallet.balance,
-    });
-
-    await this.redisService.invalidateBalance(id);
-
-    return wallet;
   }
 
   async transfer(dto: TransferDto) {

@@ -160,17 +160,25 @@ describe('WalletsService', () => {
       expect(walletModel.findByIdAndUpdate).toHaveBeenCalledWith(
         walletId,
         { $inc: { balance: 50 } },
-        { new: true },
+        { new: true, session: mockSession },
       );
       expect(transactionsService.create).toHaveBeenCalledWith(
         expect.objectContaining({ type: TransactionType.DEPOSIT, amount: 50 }),
+        mockSession,
       );
       expect(ledgerService.recordCredit).toHaveBeenCalledWith(
         updatedWallet._id,
         transaction._id,
         50,
         150,
+        mockSession,
       );
+      expect(outboxService.enqueue).toHaveBeenCalledWith(
+        'wallet.deposited',
+        expect.objectContaining({ amount: 50 }),
+        mockSession,
+      );
+      expect(mockSession.endSession).toHaveBeenCalled();
       expect(result).toBe(updatedWallet);
     });
 
@@ -180,6 +188,7 @@ describe('WalletsService', () => {
       await expect(service.deposit('missing-id', { amount: 10 })).rejects.toThrow(
         NotFoundException,
       );
+      expect(mockSession.endSession).toHaveBeenCalled();
     });
   });
 
@@ -195,17 +204,25 @@ describe('WalletsService', () => {
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'w1', balance: { $gte: 40 } },
         { $inc: { balance: -40 } },
-        { new: true },
+        { new: true, session: mockSession },
       );
       expect(transactionsService.create).toHaveBeenCalledWith(
         expect.objectContaining({ type: TransactionType.WITHDRAWAL, amount: 40, balanceAfter: 60 }),
+        mockSession,
       );
       expect(ledgerService.recordDebit).toHaveBeenCalledWith(
         updatedWallet._id,
         transaction._id,
         40,
         60,
+        mockSession,
       );
+      expect(outboxService.enqueue).toHaveBeenCalledWith(
+        'wallet.withdrawn',
+        expect.objectContaining({ amount: 40 }),
+        mockSession,
+      );
+      expect(mockSession.endSession).toHaveBeenCalled();
       expect(result).toBe(updatedWallet);
     });
 
@@ -217,9 +234,10 @@ describe('WalletsService', () => {
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'w1', balance: { $gte: 40 } },
         { $inc: { balance: -40 } },
-        { new: true },
+        { new: true, session: mockSession },
       );
-      expect(walletModel.findById).toHaveBeenCalledWith('w1');
+      expect(walletModel.findById).toHaveBeenCalledWith('w1', null, { session: mockSession });
+      expect(mockSession.endSession).toHaveBeenCalled();
     });
 
     it('throws NotFoundException when the wallet does not exist', async () => {
@@ -232,9 +250,10 @@ describe('WalletsService', () => {
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'missing-id', balance: { $gte: 10 } },
         { $inc: { balance: -10 } },
-        { new: true },
+        { new: true, session: mockSession },
       );
-      expect(walletModel.findById).toHaveBeenCalledWith('missing-id');
+      expect(walletModel.findById).toHaveBeenCalledWith('missing-id', null, { session: mockSession });
+      expect(mockSession.endSession).toHaveBeenCalled();
     });
   });
 
