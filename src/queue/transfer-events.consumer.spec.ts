@@ -1,4 +1,4 @@
-import { getModelToken } from '@nestjs/mongoose';
+import { getConnectionToken, getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Types } from 'mongoose';
 import { LedgerService } from '../ledger/ledger.service';
@@ -15,16 +15,22 @@ describe('TransferEventsConsumer', () => {
   let walletModel: any;
   let transactionModel: any;
   let ledgerService: any;
+  let mockSession: any;
 
   beforeEach(async () => {
     transferModel = { findById: jest.fn() };
     walletModel = { findById: jest.fn() };
     transactionModel = { create: jest.fn() };
     ledgerService = { recordCredit: jest.fn() };
+    mockSession = {
+      withTransaction: jest.fn(async (fn: () => Promise<unknown>) => fn()),
+      endSession: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TransferEventsConsumer,
+        { provide: getConnectionToken(), useValue: { startSession: jest.fn().mockResolvedValue(mockSession) } },
         {
           provide: RabbitMQService,
           useValue: { getChannelWrapper: jest.fn(), getTransferQueue: jest.fn() },
@@ -80,18 +86,20 @@ describe('TransferEventsConsumer', () => {
     });
 
     expect(toWallet.balance).toBe(125);
-    expect(toWallet.save).toHaveBeenCalled();
-    expect(transactionModel.create).toHaveBeenCalledWith([
-      expect.objectContaining({ type: TransactionType.TRANSFER_IN, amount: 25, balanceAfter: 125 }),
-    ]);
+    expect(toWallet.save).toHaveBeenCalledWith({ session: mockSession });
+    expect(transactionModel.create).toHaveBeenCalledWith(
+      [expect.objectContaining({ type: TransactionType.TRANSFER_IN, amount: 25, balanceAfter: 125 })],
+      { session: mockSession },
+    );
     expect(ledgerService.recordCredit).toHaveBeenCalledWith(
       toWallet._id,
       creditTransaction._id,
       25,
       125,
+      mockSession,
     );
     expect(transfer.status).toBe(TransferStatus.COMPLETED);
-    expect(transfer.save).toHaveBeenCalled();
+    expect(transfer.save).toHaveBeenCalledWith({ session: mockSession });
   });
 
   it('skips processing when the transfer no longer exists', async () => {

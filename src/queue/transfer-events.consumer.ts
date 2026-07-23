@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ConsumeMessage } from 'amqplib';
-import { Model } from 'mongoose';
+import { Connection, Model } from 'mongoose';
 import { LedgerService } from '../ledger/ledger.service';
 import { RedisService } from '../redis/redis.service';
 import {
@@ -26,6 +26,7 @@ export class TransferEventsConsumer implements OnModuleInit {
   private readonly logger = new Logger(TransferEventsConsumer.name);
 
   constructor(
+    @InjectConnection() private readonly connection: Connection,
     private readonly rabbitMQService: RabbitMQService,
     @InjectModel(Transfer.name) private readonly transferModel: Model<TransferDocument>,
     @InjectModel(Wallet.name) private readonly walletModel: Model<WalletDocument>,
@@ -71,39 +72,50 @@ export class TransferEventsConsumer implements OnModuleInit {
       return;
     }
 
-    const toWallet = await this.walletModel.findById(event.toWalletId);
-    if (!toWallet) {
-      this.logger.warn(`Destination wallet ${event.toWalletId} not found, skipping`);
-      return;
+    const session = await this.connection.startSession();
+
+    try {
+      await session.withTransaction(async () => {
+        const toWallet = await this.walletModel.findById(event.toWalletId, null, { session });
+        if (!toWallet) {
+          throw new Error(`Destination wallet ${event.toWalletId} not found`);
+        }
+
+        toWallet.balance += event.amount;
+        await toWallet.save({ session });
+
+        const [creditTransaction] = await this.transactionModel.create(
+          [
+            {
+              walletId: toWallet._id,
+              type: TransactionType.TRANSFER_IN,
+              amount: event.amount,
+              status: TransactionStatus.COMPLETED,
+              balanceAfter: toWallet.balance,
+              transferId: transfer._id,
+              counterpartyWalletId: transfer.fromWalletId,
+            },
+          ],
+          { session },
+        );
+
+        await this.ledgerService.recordCredit(
+          toWallet._id,
+          creditTransaction._id,
+          event.amount,
+          toWallet.balance,
+          session,
+        );
+
+        transfer.status = TransferStatus.COMPLETED;
+        await transfer.save({ session });
+      });
+    } finally {
+      await session.endSession();
     }
-
-    toWallet.balance += event.amount;
-    await toWallet.save();
-
-    const [creditTransaction] = await this.transactionModel.create([
-      {
-        walletId: toWallet._id,
-        type: TransactionType.TRANSFER_IN,
-        amount: event.amount,
-        status: TransactionStatus.COMPLETED,
-        balanceAfter: toWallet.balance,
-        transferId: transfer._id,
-        counterpartyWalletId: transfer.fromWalletId,
-      },
-    ]);
-
-    await this.ledgerService.recordCredit(
-      toWallet._id,
-      creditTransaction._id,
-      event.amount,
-      toWallet.balance,
-    );
-
-    transfer.status = TransferStatus.COMPLETED;
-    await transfer.save();
 
     await this.redisService.invalidateBalance(event.toWalletId);
 
-    this.logger.log(`Transfer ${transfer.id} completed for wallet ${toWallet.id}`);
+    this.logger.log(`Transfer ${transfer.id} completed for wallet ${event.toWalletId}`);
   }
 }

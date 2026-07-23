@@ -106,6 +106,13 @@ export class WalletsService {
 
     await this.ledgerService.recordCredit(wallet._id, transaction._id, dto.amount, wallet.balance);
 
+    await this.outboxService.enqueue('wallet.deposited', {
+      walletId: wallet.id,
+      transactionId: transaction.id,
+      amount: dto.amount,
+      balanceAfter: wallet.balance,
+    });
+
     await this.redisService.invalidateBalance(id);
 
     return wallet;
@@ -136,6 +143,13 @@ export class WalletsService {
 
     await this.ledgerService.recordDebit(wallet._id, transaction._id, dto.amount, wallet.balance);
 
+    await this.outboxService.enqueue('wallet.withdrawn', {
+      walletId: wallet.id,
+      transactionId: transaction.id,
+      amount: dto.amount,
+      balanceAfter: wallet.balance,
+    });
+
     await this.redisService.invalidateBalance(id);
 
     return wallet;
@@ -144,19 +158,6 @@ export class WalletsService {
   async transfer(dto: TransferDto) {
     if (dto.fromWalletId === dto.toWalletId) {
       throw new BadRequestException('Cannot transfer to the same wallet');
-    }
-
-    const [fromWallet, toWallet] = await Promise.all([
-      this.walletModel.findById(dto.fromWalletId),
-      this.walletModel.findById(dto.toWalletId),
-    ]);
-
-    if (!fromWallet || !toWallet) {
-      throw new NotFoundException('Wallet not found');
-    }
-
-    if (fromWallet.balance < dto.amount) {
-      throw new BadRequestException('Insufficient balance');
     }
 
     if (dto.idempotencyKey) {
@@ -171,6 +172,19 @@ export class WalletsService {
 
     try {
       await session.withTransaction(async () => {
+        const [fromWallet, toWallet] = await Promise.all([
+          this.walletModel.findById(dto.fromWalletId, null, { session }),
+          this.walletModel.findById(dto.toWalletId, null, { session }),
+        ]);
+
+        if (!fromWallet || !toWallet) {
+          throw new NotFoundException('Wallet not found');
+        }
+
+        if (fromWallet.balance < dto.amount) {
+          throw new BadRequestException('Insufficient balance');
+        }
+
         [transfer] = await this.transferModel.create(
           [
             {
