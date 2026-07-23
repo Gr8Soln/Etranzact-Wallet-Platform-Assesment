@@ -241,6 +241,20 @@ export class WalletsService {
       .sort({ createdAt: -1 })
       .exec();
 
+    const txnIds = transactions.map((t) => t._id);
+    const allEntries = await this.ledgerEntryModel
+      .find({ transactionId: { $in: txnIds } })
+      .exec();
+
+    const entriesByTxnId = new Map<string, LedgerEntryDocument[]>();
+    for (const entry of allEntries) {
+      const key = entry.transactionId.toString();
+      if (!entriesByTxnId.has(key)) {
+        entriesByTxnId.set(key, []);
+      }
+      entriesByTxnId.get(key)!.push(entry);
+    }
+
     let totalDeposited = 0;
     let totalWithdrawn = 0;
     const recentActivity: Array<{
@@ -249,7 +263,7 @@ export class WalletsService {
     }> = [];
 
     for (const txn of transactions) {
-      const entries = await this.ledgerEntryModel.find({ transactionId: txn._id }).exec();
+      const entries = entriesByTxnId.get(txn._id.toString()) ?? [];
 
       if (txn.type === TransactionType.DEPOSIT || txn.type === TransactionType.TRANSFER_IN) {
         totalDeposited += txn.amount;

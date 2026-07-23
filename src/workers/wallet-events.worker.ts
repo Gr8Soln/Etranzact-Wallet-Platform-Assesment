@@ -26,11 +26,13 @@ export class WalletEventsWorker implements OnModuleInit, OnModuleDestroy {
     const recentWallets = await this.walletModel.find().sort({ updatedAt: -1 }).limit(20).exec();
 
     for (const wallet of recentWallets) {
-      walletEventBus.on(`wallet.snapshot.${wallet.id}`, (balance: number) => {
+      const eventName = `wallet.snapshot.${wallet.id}`;
+      walletEventBus.removeAllListeners(eventName);
+      walletEventBus.on(eventName, (balance: number) => {
         this.logger.debug(`Wallet ${wallet.id} snapshot balance=${balance}`);
       });
 
-      walletEventBus.emit(`wallet.snapshot.${wallet.id}`, wallet.balance);
+      walletEventBus.emit(eventName, wallet.balance);
     }
   }
 

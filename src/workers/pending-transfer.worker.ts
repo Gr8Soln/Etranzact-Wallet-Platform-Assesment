@@ -29,8 +29,13 @@ export class PendingTransferWorker implements OnModuleInit, OnModuleDestroy {
       .find({ status: TransferStatus.PENDING, createdAt: { $lt: cutoff } })
       .exec();
 
-    if (stale.length > 0) {
-      this.logger.warn(`Found ${stale.length} transfer(s) pending past the timeout window`);
+    for (const transfer of stale) {
+      transfer.status = TransferStatus.FAILED;
+      transfer.failureReason = `Transfer timed out after ${timeoutMs}ms in PENDING state`;
+      await transfer.save();
+      this.logger.warn(
+        `Marked transfer ${transfer.id} as FAILED (pending since ${transfer.createdAt?.toISOString()})`,
+      );
     }
   }
 

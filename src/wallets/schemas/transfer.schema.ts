@@ -34,3 +34,5 @@ export class Transfer {
 }
 
 export const TransferSchema = SchemaFactory.createForClass(Transfer);
+
+TransferSchema.index({ status: 1, createdAt: 1 });
