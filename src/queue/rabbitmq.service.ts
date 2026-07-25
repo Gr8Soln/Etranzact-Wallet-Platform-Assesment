@@ -24,13 +24,22 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(`RabbitMQ connection failed: ${err?.err?.message}`),
     );
 
+    const dlxName = `${this.exchange}.dlx`;
+    const dlqName = `${this.transferQueue}.dlq`;
+
     this.channelWrapper = this.connection.createChannel({
       json: true,
       setup: (channel: ConfirmChannel) =>
         Promise.all([
           channel.assertExchange(this.exchange, 'topic', { durable: true }),
-          channel.assertQueue(this.transferQueue, { durable: true }),
+          channel.assertExchange(dlxName, 'topic', { durable: true }),
+          channel.assertQueue(this.transferQueue, {
+            durable: true,
+            arguments: { 'x-dead-letter-exchange': dlxName },
+          }),
           channel.bindQueue(this.transferQueue, this.exchange, 'transfer.*'),
+          channel.assertQueue(dlqName, { durable: true }),
+          channel.bindQueue(dlqName, dlxName, '#'),
         ]),
     });
   }

@@ -42,4 +42,9 @@ export class WalletsController {
   withdraw(@Param('id') id: string, @Body() dto: WithdrawDto) {
     return this.walletsService.withdraw(id, dto);
   }
+
+  @Get(':id/reconcile')
+  reconcile(@Param('id') id: string) {
+    return this.walletsService.reconcile(id);
+  }
 }

@@ -49,7 +49,7 @@ describe('WalletsService', () => {
       find: jest.fn(),
     };
     transactionsService = { create: jest.fn() };
-    ledgerService = { recordCredit: jest.fn(), recordDebit: jest.fn() };
+    ledgerService = { recordCredit: jest.fn(), recordDebit: jest.fn(), aggregateNetByWallet: jest.fn() };
     outboxService = { enqueue: jest.fn() };
     rabbitMQService = { publish: jest.fn() };
     redisService = {
@@ -159,7 +159,7 @@ describe('WalletsService', () => {
 
       expect(walletModel.findByIdAndUpdate).toHaveBeenCalledWith(
         walletId,
-        { $inc: { balance: 50 } },
+        { $inc: { balance: 50, version: 1 } },
         { new: true, session: mockSession },
       );
       expect(transactionsService.create).toHaveBeenCalledWith(
@@ -203,7 +203,7 @@ describe('WalletsService', () => {
 
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'w1', balance: { $gte: 40 } },
-        { $inc: { balance: -40 } },
+        { $inc: { balance: -40, version: 1 } },
         { new: true, session: mockSession },
       );
       expect(transactionsService.create).toHaveBeenCalledWith(
@@ -233,7 +233,7 @@ describe('WalletsService', () => {
       await expect(service.withdraw('w1', { amount: 40 })).rejects.toThrow(BadRequestException);
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'w1', balance: { $gte: 40 } },
-        { $inc: { balance: -40 } },
+        { $inc: { balance: -40, version: 1 } },
         { new: true, session: mockSession },
       );
       expect(walletModel.findById).toHaveBeenCalledWith('w1', null, { session: mockSession });
@@ -249,7 +249,7 @@ describe('WalletsService', () => {
       );
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'missing-id', balance: { $gte: 10 } },
-        { $inc: { balance: -10 } },
+        { $inc: { balance: -10, version: 1 } },
         { new: true, session: mockSession },
       );
       expect(walletModel.findById).toHaveBeenCalledWith('missing-id', null, { session: mockSession });
@@ -262,7 +262,7 @@ describe('WalletsService', () => {
     const toId = new Types.ObjectId();
 
     function mockWallets(fromBalance: number) {
-      const fromWallet = { _id: fromId, balance: fromBalance, save: jest.fn() };
+      const fromWallet = { _id: fromId, balance: fromBalance, version: 0, save: jest.fn() };
       const toWallet = { _id: toId, balance: 0 };
       walletModel.findById.mockImplementation((id: unknown) => {
         if (String(id) === String(fromId)) return Promise.resolve(fromWallet);
@@ -376,6 +376,41 @@ describe('WalletsService', () => {
 
       expect(mockSession.endSession).toHaveBeenCalled();
       expect(outboxService.enqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reconcile', () => {
+    it('returns the recorded balance, computed balance, and whether they are in sync', async () => {
+      const wallet = { id: 'w1', _id: 'w1', balance: 500, toObject: () => wallet };
+      walletModel.findById.mockResolvedValue(wallet);
+      ledgerService.aggregateNetByWallet.mockResolvedValue(500);
+
+      const result = await service.reconcile('w1');
+
+      expect(result).toEqual({
+        walletId: 'w1',
+        recordedBalance: 500,
+        computedBalance: 500,
+        difference: 0,
+        inSync: true,
+      });
+    });
+
+    it('reports a discrepancy when recorded balance differs from computed balance', async () => {
+      const wallet = { id: 'w1', _id: 'w1', balance: 500, toObject: () => wallet };
+      walletModel.findById.mockResolvedValue(wallet);
+      ledgerService.aggregateNetByWallet.mockResolvedValue(480);
+
+      const result = await service.reconcile('w1');
+
+      expect(result.inSync).toBe(false);
+      expect(result.difference).toBe(-20);
+    });
+
+    it('throws NotFoundException when the wallet does not exist', async () => {
+      walletModel.findById.mockResolvedValue(null);
+
+      await expect(service.reconcile('missing-id')).rejects.toThrow(NotFoundException);
     });
   });
 });

@@ -82,6 +82,7 @@ export class TransferEventsConsumer implements OnModuleInit {
         }
 
         toWallet.balance += event.amount;
+        toWallet.version += 1;
         await toWallet.save({ session });
 
         const [creditTransaction] = await this.transactionModel.create(

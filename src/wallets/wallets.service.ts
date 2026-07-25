@@ -95,7 +95,7 @@ export class WalletsService {
       await session.withTransaction(async () => {
         wallet = (await this.walletModel.findByIdAndUpdate(
           id,
-          { $inc: { balance: dto.amount } },
+          { $inc: { balance: dto.amount, version: 1 } },
           { new: true, session },
         ))!;
 
@@ -141,7 +141,7 @@ export class WalletsService {
       await session.withTransaction(async () => {
         wallet = (await this.walletModel.findOneAndUpdate(
           { _id: id, balance: { $gte: dto.amount } },
-          { $inc: { balance: -dto.amount } },
+          { $inc: { balance: -dto.amount, version: 1 } },
           { new: true, session },
         ))!;
 
@@ -225,6 +225,7 @@ export class WalletsService {
         );
 
         fromWallet.balance -= dto.amount;
+        fromWallet.version += 1;
         await fromWallet.save({ session });
 
         const [debitTransaction] = await this.transactionModel.create(
@@ -320,6 +321,23 @@ export class WalletsService {
       totalWithdrawn,
       transactionCount: transactions.length,
       recentActivity: recentActivity.slice(0, 10),
+    };
+  }
+
+  async reconcile(id: string) {
+    const wallet = await this.walletModel.findById(id);
+    if (!wallet) {
+      throw new NotFoundException(`Wallet ${id} not found`);
+    }
+
+    const computedBalance = await this.ledgerService.aggregateNetByWallet(id);
+
+    return {
+      walletId: wallet._id.toString(),
+      recordedBalance: wallet.balance,
+      computedBalance,
+      difference: computedBalance - wallet.balance,
+      inSync: computedBalance === wallet.balance,
     };
   }
 }

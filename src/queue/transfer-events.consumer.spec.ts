@@ -72,7 +72,7 @@ describe('TransferEventsConsumer', () => {
       save: jest.fn(),
       status: TransferStatus.PENDING,
     };
-    const toWallet = { _id: new Types.ObjectId(), id: 'wallet-2', balance: 100, save: jest.fn() };
+    const toWallet = { _id: new Types.ObjectId(), id: 'wallet-2', balance: 100, version: 0, save: jest.fn() };
     transferModel.findById.mockResolvedValue(transfer);
     walletModel.findById.mockResolvedValue(toWallet);
     const creditTransaction = { _id: new Types.ObjectId() };
