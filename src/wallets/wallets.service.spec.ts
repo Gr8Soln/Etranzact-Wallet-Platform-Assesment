@@ -270,6 +270,17 @@ describe('WalletsService', () => {
         if (String(id) === String(toId)) return Promise.resolve(toWallet);
         return Promise.resolve(null);
       });
+      walletModel.findOneAndUpdate.mockImplementation((query: any, update: any) => {
+        if (String(query._id) === String(fromId)) {
+          if (query.balance?.$gte !== undefined && fromBalance < query.balance.$gte) {
+            return Promise.resolve(null);
+          }
+          const dec = update.$inc?.balance || 0;
+          fromWallet.balance += dec;
+          return Promise.resolve(fromWallet);
+        }
+        return Promise.resolve(null);
+      });
       return { fromWallet, toWallet };
     }
 
@@ -339,8 +350,13 @@ describe('WalletsService', () => {
     it('returns the existing transfer when retried with the same idempotency key', async () => {
       mockWallets(100);
       const existingTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
-      transferModel.findOne.mockResolvedValue(null);
-      transferModel.create.mockResolvedValue([{ _id: new Types.ObjectId(), status: 'PENDING' }]);
+      transferModel.findOne.mockResolvedValue(existingTransfer);
+      
+      // First call succeeds, second call throws duplicate key error
+      transferModel.create
+        .mockResolvedValueOnce([{ _id: new Types.ObjectId(), status: 'PENDING' }])
+        .mockRejectedValueOnce({ code: 11000 });
+        
       transactionModel.create.mockResolvedValue([{ _id: new Types.ObjectId() }]);
 
       const dto = {
@@ -350,14 +366,13 @@ describe('WalletsService', () => {
         idempotencyKey: 'retry-key-1',
       };
 
-      // First call: no existing transfer, creates one
+      // First call: creates one
       await service.transfer(dto);
 
-      // Second call: findOne returns existing, skips creation
-      transferModel.findOne.mockResolvedValue(existingTransfer);
+      // Second call: create throws 11000, catch block returns existing
       const result = await service.transfer(dto);
 
-      expect(transferModel.create).toHaveBeenCalledTimes(1);
+      expect(transferModel.create).toHaveBeenCalledTimes(2);
       expect(result).toBe(existingTransfer);
     });
 
