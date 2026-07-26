@@ -1,0 +1,71 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: wallet-platform-mongo
+    command: ['--replSet', 'rs0', '--bind_ip_all']
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo-data-dev:/data/db
+    healthcheck:
+      test: >
+        mongosh --quiet --eval
+        "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]}).ok }"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: wallet-platform-redis
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: wallet-platform-rabbitmq
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: wallet-platform-api
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - '3000:3000'
+    environment:
+      PORT: 3000
+      MONGODB_URI: mongodb://mongo:27017/wallet-platform?replicaSet=rs0&directConnection=true
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_TTL_SECONDS: 3600
+      RABBITMQ_URI: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_EXCHANGE: wallet.events
+      RABBITMQ_TRANSFER_QUEUE: transfer.events.queue
+      JWT_SECRET: change-me-in-production
+      JWT_EXPIRES_IN: 3600s
+      OUTBOX_RELAY_INTERVAL_MS: 2000
+      PENDING_TRANSFER_SWEEP_INTERVAL_MS: 5000
+      PENDING_TRANSFER_TIMEOUT_MS: 60000
+
+volumes:
+  mongo-data-dev:
