@@ -22,9 +22,7 @@ export class PendingTransferWorker implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    const intervalMs = this.configService.getOrThrow<number>(
-      'workers.pendingTransferSweepIntervalMs',
-    );
+    const intervalMs = this.configService.getOrThrow<number>('workers.pendingTransferSweepIntervalMs');
     this.timer = setInterval(() => this.sweep(), intervalMs);
   }
 
@@ -32,39 +30,54 @@ export class PendingTransferWorker implements OnModuleInit, OnModuleDestroy {
     const timeoutMs = this.configService.getOrThrow<number>('workers.pendingTransferTimeoutMs');
     const cutoff = new Date(Date.now() - timeoutMs);
 
-    const stale = await this.transferModel
+    // Fetch raw stale IDs only to minimize memory overhead
+    const staleTransfers = await this.transferModel
       .find({ status: TransferStatus.PENDING, createdAt: { $lt: cutoff } })
+      .select('_id fromWalletId amount')
+      .lean()
       .exec();
 
-    for (const transfer of stale) {
+    for (const stale of staleTransfers) {
       const session = await this.connection.startSession();
       try {
         await session.withTransaction(async () => {
-          // Refund the original sender
+          // Atomic State Lock: Claim the transfer before doing ANY refund logic
+          // This prevents Double-Refund race conditions across horizontal instances
+          const lockedTransfer = await this.transferModel.findOneAndUpdate(
+            { _id: stale._id, status: TransferStatus.PENDING },
+            { 
+              status: TransferStatus.FAILED, 
+              failureReason: `Transfer timed out after ${timeoutMs}ms in PENDING state` 
+            },
+            { new: true, session }
+          );
+
+          if (!lockedTransfer) return; // Another server instance already claimed/refunded this
+
+          // Refund the original sender atomically
           const wallet = await this.walletModel.findOneAndUpdate(
-            { _id: transfer.fromWalletId },
-            { $inc: { balance: transfer.amount, version: 1 } },
+            { _id: lockedTransfer.fromWalletId },
+            { $inc: { balance: lockedTransfer.amount } },
             { new: true, session },
           );
+
           if (wallet) {
             const [refundTxn] = await this.transactionModel.create([{
               walletId: wallet._id,
               type: TransactionType.TRANSFER_IN,
-              amount: transfer.amount,
+              amount: lockedTransfer.amount,
               status: TransactionStatus.COMPLETED,
               balanceAfter: wallet.balance,
-              transferId: transfer._id,
-              reference: `REFUND-${transfer._id}`
+              transferId: lockedTransfer._id,
+              reference: `REFUND-${lockedTransfer._id}`
             }], { session });
-            await this.ledgerService.recordCredit(wallet._id, refundTxn._id, transfer.amount, wallet.balance, session);
+
+            await this.ledgerService.recordCredit(wallet._id, refundTxn._id, lockedTransfer.amount, wallet.balance, session);
           }
-          transfer.status = TransferStatus.FAILED;
-          transfer.failureReason = `Transfer timed out after ${timeoutMs}ms in PENDING state`;
-          await transfer.save({ session });
         });
-        this.logger.warn(`Marked transfer ${transfer.id} as FAILED and refunded sender`);
+        this.logger.warn(`Marked transfer ${stale._id} as FAILED and refunded sender`);
       } catch (err) {
-        this.logger.error(`Failed to refund transfer ${transfer.id}: ${(err as Error).message}`);
+        this.logger.error(`Failed to refund transfer ${stale._id}: ${(err as Error).message}`);
       } finally {
         await session.endSession();
       }

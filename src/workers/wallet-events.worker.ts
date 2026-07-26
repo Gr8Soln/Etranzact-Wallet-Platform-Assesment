@@ -1,40 +1,57 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { EventEmitter } from 'events';
 import { Model } from 'mongoose';
 import { Wallet, WalletDocument } from '../wallets/schemas/wallet.schema';
-
-export const walletEventBus = new EventEmitter();
-walletEventBus.setMaxListeners(0);
+import { RedisService } from '../redis/redis.service';
 
 /**
- * Watches wallets whose balance recently changed and logs a snapshot for
- * downstream monitoring dashboards. Ticks on a fixed interval.
+ * Watches wallets whose balance changes utilizing native MongoDB Change Streams
+ * and propagates events globally via Redis Pub/Sub, eliminating CPU polling loops.
  */
 @Injectable()
 export class WalletEventsWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WalletEventsWorker.name);
-  private timer: NodeJS.Timeout;
+  private changeStream: any;
+  private subscriberClient: any;
 
-  constructor(@InjectModel(Wallet.name) private readonly walletModel: Model<WalletDocument>) {}
+  constructor(
+    @InjectModel(Wallet.name) private readonly walletModel: Model<WalletDocument>,
+    private readonly redisService: RedisService
+  ) {}
 
-  onModuleInit() {
-    // Bind listener once to prevent memory leak
-    walletEventBus.on('wallet.snapshot', (data: { walletId: string, balance: number }) => {
-      this.logger.debug(`Wallet ${data.walletId} snapshot balance=${data.balance}`);
+  async onModuleInit() {
+    // 1. Setup Redis Subscriber for cross-node global event propagation
+    this.subscriberClient = this.redisService.getClient().duplicate();
+    await this.subscriberClient.subscribe('wallet-snapshots');
+    this.subscriberClient.on('message', (channel: string, message: string) => {
+      if (channel === 'wallet-snapshots') {
+        const data = JSON.parse(message);
+        this.logger.debug(`[Global Event] Wallet ${data.walletId} snapshot balance=${data.balance}`);
+      }
     });
-    this.timer = setInterval(() => this.tick(), 10_000);
+
+    // 2. Setup MongoDB Native Change Stream to eliminate DB polling loops
+    this.changeStream = this.walletModel.watch([
+      { $match: { 'operationType': { $in: ['insert', 'update'] } } }
+    ]);
+
+    this.changeStream.on('change', async (change: any) => {
+      if (change.operationType === 'update' && change.updateDescription.updatedFields.balance !== undefined) {
+        const walletId = change.documentKey._id.toString();
+        const balance = change.updateDescription.updatedFields.balance;
+        
+        // Publish strictly to Redis for distributed cluster consumption
+        await this.redisService.getClient().publish('wallet-snapshots', JSON.stringify({ walletId, balance }));
+      }
+    });
   }
 
-  private async tick() {
-    const recentWallets = await this.walletModel.find().sort({ updatedAt: -1 }).limit(20).exec();
-
-    for (const wallet of recentWallets) {
-      walletEventBus.emit('wallet.snapshot', { walletId: wallet.id, balance: wallet.balance });
+  async onModuleDestroy() {
+    if (this.changeStream) {
+      await this.changeStream.close();
     }
-  }
-
-  onModuleDestroy() {
-    clearInterval(this.timer);
+    if (this.subscriberClient) {
+      await this.subscriberClient.quit();
+    }
   }
 }

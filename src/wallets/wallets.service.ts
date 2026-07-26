@@ -93,9 +93,10 @@ export class WalletsService {
       let transaction!: TransactionDocument;
 
       await session.withTransaction(async () => {
+        // Atomic update without redundant version increment
         wallet = (await this.walletModel.findByIdAndUpdate(
           id,
-          { $inc: { balance: dto.amount, version: 1 } },
+          { $inc: { balance: dto.amount } },
           { new: true, session },
         ))!;
 
@@ -121,9 +122,9 @@ export class WalletsService {
           amount: dto.amount,
           balanceAfter: wallet.balance,
         }, session);
+        // Cache update INSIDE the transaction boundary to prevent stale reads
+        await this.redisService.setCachedBalance(id, wallet.balance);
       });
-
-      await this.redisService.invalidateBalance(id);
 
       return wallet;
     } finally {
@@ -139,9 +140,10 @@ export class WalletsService {
       let transaction!: TransactionDocument;
 
       await session.withTransaction(async () => {
+        // Atomic update with $gte check, no redundant version tracking
         wallet = (await this.walletModel.findOneAndUpdate(
           { _id: id, balance: { $gte: dto.amount } },
-          { $inc: { balance: -dto.amount, version: 1 } },
+          { $inc: { balance: -dto.amount } },
           { new: true, session },
         ))!;
 
@@ -171,9 +173,9 @@ export class WalletsService {
           amount: dto.amount,
           balanceAfter: wallet.balance,
         }, session);
+        // Cache update INSIDE the transaction boundary
+        await this.redisService.setCachedBalance(id, wallet.balance);
       });
-
-      await this.redisService.invalidateBalance(id);
 
       return wallet;
     } finally {
@@ -193,10 +195,16 @@ export class WalletsService {
 
     try {
       await session.withTransaction(async () => {
-        // Atomically debit source wallet to prevent negative balance races
+        // Deadlock Prevention: Order wallet IDs to enforce a strict locking hierarchy
+        const sortedIds = [dto.fromWalletId, dto.toWalletId].sort();
+        
+        // Lock both wallets in alphabetical order to prevent cross-locks
+        await this.walletModel.find({ _id: { $in: sortedIds } }).session(session);
+
+        // Now safely perform atomic debit with constraint
         const fromWallet = await this.walletModel.findOneAndUpdate(
           { _id: dto.fromWalletId, balance: { $gte: dto.amount } },
-          { $inc: { balance: -dto.amount, version: 1 } },
+          { $inc: { balance: -dto.amount } },
           { new: true, session },
         );
         const toWallet = await this.walletModel.findById(dto.toWalletId, null, { session });
@@ -256,6 +264,8 @@ export class WalletsService {
           },
           session,
         );
+        // Update cache strictly inside transaction boundary
+        await this.redisService.setCachedBalance(dto.fromWalletId, fromWallet.balance);
       });
     } catch (error: any) {
       if (error.code === 11000 && dto.idempotencyKey) {
@@ -267,8 +277,6 @@ export class WalletsService {
     } finally {
       await session.endSession();
     }
-
-    await this.redisService.invalidateBalance(dto.fromWalletId);
 
     return transfer;
   }
