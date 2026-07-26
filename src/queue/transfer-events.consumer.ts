@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ConsumeMessage } from 'amqplib';
 import { Connection, Model } from 'mongoose';
+
 import { LedgerService } from '../ledger/ledger.service';
 import { RedisService } from '../redis/redis.service';
 import {
@@ -56,26 +57,33 @@ export class TransferEventsConsumer implements OnModuleInit {
       channel.ack(message);
     } catch (error) {
       this.logger.error(`Failed to process transfer event: ${(error as Error).message}`);
-      channel.nack(message, false, false);
+      // Requeue failed messages to prevent message loss
+      channel.nack(message, false, true);
     }
   }
 
   private async completeTransfer(event: TransferInitiatedEvent) {
-    const transfer = await this.transferModel.findById(event.transferId);
-    if (!transfer) {
-      this.logger.warn(`Transfer ${event.transferId} not found, skipping`);
-      return;
-    }
-
-    if (transfer.status === TransferStatus.COMPLETED) {
-      this.logger.warn(`Transfer ${event.transferId} already completed, skipping (idempotent)`);
-      return;
-    }
-
     const session = await this.connection.startSession();
+    let isAlreadyCompleted = false;
+    let notFound = false;
+    let transferId = event.transferId;
 
     try {
       await session.withTransaction(async () => {
+        // Idempotency: atomically transition to COMPLETED to prevent duplicate credits
+        const transfer = await this.transferModel.findOneAndUpdate(
+          { _id: transferId, status: TransferStatus.PENDING },
+          { status: TransferStatus.COMPLETED },
+          { new: true, session },
+        );
+
+        if (!transfer) {
+          const exists = await this.transferModel.findById(transferId, null, { session });
+          if (!exists) notFound = true;
+          else isAlreadyCompleted = true;
+          return;
+        }
+
         const toWallet = await this.walletModel.findById(event.toWalletId, null, { session });
         if (!toWallet) {
           throw new Error(`Destination wallet ${event.toWalletId} not found`);
@@ -107,16 +115,23 @@ export class TransferEventsConsumer implements OnModuleInit {
           toWallet.balance,
           session,
         );
-
-        transfer.status = TransferStatus.COMPLETED;
-        await transfer.save({ session });
       });
     } finally {
       await session.endSession();
     }
 
+    if (notFound) {
+      this.logger.warn(`Transfer ${transferId} not found, skipping`);
+      return;
+    }
+
+    if (isAlreadyCompleted) {
+      this.logger.warn(`Transfer ${transferId} already completed, skipping (idempotent)`);
+      return;
+    }
+
     await this.redisService.invalidateBalance(event.toWalletId);
 
-    this.logger.log(`Transfer ${transfer.id} completed for wallet ${event.toWalletId}`);
+    this.logger.log(`Transfer ${transferId} completed for wallet ${event.toWalletId}`);
   }
 }

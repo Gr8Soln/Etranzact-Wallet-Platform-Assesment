@@ -19,6 +19,10 @@ export class WalletEventsWorker implements OnModuleInit, OnModuleDestroy {
   constructor(@InjectModel(Wallet.name) private readonly walletModel: Model<WalletDocument>) {}
 
   onModuleInit() {
+    // Bind listener once to prevent memory leak
+    walletEventBus.on('wallet.snapshot', (data: { walletId: string, balance: number }) => {
+      this.logger.debug(`Wallet ${data.walletId} snapshot balance=${data.balance}`);
+    });
     this.timer = setInterval(() => this.tick(), 10_000);
   }
 
@@ -26,13 +30,7 @@ export class WalletEventsWorker implements OnModuleInit, OnModuleDestroy {
     const recentWallets = await this.walletModel.find().sort({ updatedAt: -1 }).limit(20).exec();
 
     for (const wallet of recentWallets) {
-      const eventName = `wallet.snapshot.${wallet.id}`;
-      walletEventBus.removeAllListeners(eventName);
-      walletEventBus.on(eventName, (balance: number) => {
-        this.logger.debug(`Wallet ${wallet.id} snapshot balance=${balance}`);
-      });
-
-      walletEventBus.emit(eventName, wallet.balance);
+      walletEventBus.emit('wallet.snapshot', { walletId: wallet.id, balance: wallet.balance });
     }
   }
 

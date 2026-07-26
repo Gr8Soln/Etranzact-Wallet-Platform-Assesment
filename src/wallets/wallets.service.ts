@@ -186,28 +186,27 @@ export class WalletsService {
       throw new BadRequestException('Cannot transfer to the same wallet');
     }
 
-    if (dto.idempotencyKey) {
-      const existing = await this.transferModel.findOne({ idempotencyKey: dto.idempotencyKey });
-      if (existing) {
-        return existing;
-      }
-    }
+    // Idempotency is now enforced by a unique index on the schema
 
     const session = await this.connection.startSession();
     let transfer!: TransferDocument;
 
     try {
       await session.withTransaction(async () => {
-        const [fromWallet, toWallet] = await Promise.all([
-          this.walletModel.findById(dto.fromWalletId, null, { session }),
-          this.walletModel.findById(dto.toWalletId, null, { session }),
-        ]);
+        // Atomically debit source wallet to prevent negative balance races
+        const fromWallet = await this.walletModel.findOneAndUpdate(
+          { _id: dto.fromWalletId, balance: { $gte: dto.amount } },
+          { $inc: { balance: -dto.amount, version: 1 } },
+          { new: true, session },
+        );
+        const toWallet = await this.walletModel.findById(dto.toWalletId, null, { session });
 
-        if (!fromWallet || !toWallet) {
-          throw new NotFoundException('Wallet not found');
+        if (!toWallet) {
+          throw new NotFoundException('Destination wallet not found');
         }
-
-        if (fromWallet.balance < dto.amount) {
+        if (!fromWallet) {
+          const exists = await this.walletModel.findById(dto.fromWalletId, null, { session });
+          if (!exists) throw new NotFoundException('Source wallet not found');
           throw new BadRequestException('Insufficient balance');
         }
 
@@ -223,10 +222,6 @@ export class WalletsService {
           ],
           { session },
         );
-
-        fromWallet.balance -= dto.amount;
-        fromWallet.version += 1;
-        await fromWallet.save({ session });
 
         const [debitTransaction] = await this.transactionModel.create(
           [
@@ -262,6 +257,13 @@ export class WalletsService {
           session,
         );
       });
+    } catch (error: any) {
+      if (error.code === 11000 && dto.idempotencyKey) {
+        // Return existing transfer gracefully on duplicate key race
+        const existing = await this.transferModel.findOne({ idempotencyKey: dto.idempotencyKey });
+        if (existing) return existing;
+      }
+      throw error;
     } finally {
       await session.endSession();
     }
@@ -277,50 +279,49 @@ export class WalletsService {
       throw new NotFoundException(`Wallet ${id} not found`);
     }
 
-    const transactions = await this.transactionModel
-      .find({ walletId: id })
-      .sort({ createdAt: -1 })
-      .exec();
+    // Optimize performance by calculating totals via MongoDB aggregation instead of in-memory
+    const [stats] = await this.transactionModel.aggregate([
+      { $match: { walletId: wallet._id } },
+      {
+        $group: {
+          _id: null,
+          totalDeposited: {
+            $sum: {
+              $cond: [{ $in: ['$type', [TransactionType.DEPOSIT, TransactionType.TRANSFER_IN]] }, '$amount', 0],
+            },
+          },
+          totalWithdrawn: {
+            $sum: {
+              $cond: [{ $in: ['$type', [TransactionType.WITHDRAWAL, TransactionType.TRANSFER_OUT]] }, '$amount', 0],
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
 
-    const txnIds = transactions.map((t) => t._id);
-    const allEntries = await this.ledgerEntryModel
-      .find({ transactionId: { $in: txnIds } })
-      .exec();
+    const recentTxns = await this.transactionModel.find({ walletId: id }).sort({ createdAt: -1 }).limit(10).exec();
+    const recentTxnIds = recentTxns.map((t) => t._id);
+    const recentEntries = await this.ledgerEntryModel.find({ transactionId: { $in: recentTxnIds } }).exec();
 
     const entriesByTxnId = new Map<string, LedgerEntryDocument[]>();
-    for (const entry of allEntries) {
+    for (const entry of recentEntries) {
       const key = entry.transactionId.toString();
-      if (!entriesByTxnId.has(key)) {
-        entriesByTxnId.set(key, []);
-      }
+      if (!entriesByTxnId.has(key)) entriesByTxnId.set(key, []);
       entriesByTxnId.get(key)!.push(entry);
     }
 
-    let totalDeposited = 0;
-    let totalWithdrawn = 0;
-    const recentActivity: Array<{
-      transaction: TransactionDocument;
-      entries: LedgerEntryDocument[];
-    }> = [];
-
-    for (const txn of transactions) {
-      const entries = entriesByTxnId.get(txn._id.toString()) ?? [];
-
-      if (txn.type === TransactionType.DEPOSIT || txn.type === TransactionType.TRANSFER_IN) {
-        totalDeposited += txn.amount;
-      } else {
-        totalWithdrawn += txn.amount;
-      }
-
-      recentActivity.push({ transaction: txn, entries });
-    }
+    const recentActivity = recentTxns.map((transaction) => ({
+      transaction,
+      entries: entriesByTxnId.get(transaction._id.toString()) ?? [],
+    }));
 
     return {
       wallet,
-      totalDeposited,
-      totalWithdrawn,
-      transactionCount: transactions.length,
-      recentActivity: recentActivity.slice(0, 10),
+      totalDeposited: stats?.totalDeposited ?? 0,
+      totalWithdrawn: stats?.totalWithdrawn ?? 0,
+      transactionCount: stats?.count ?? 0,
+      recentActivity,
     };
   }
 

@@ -36,3 +36,5 @@ export class Transfer {
 export const TransferSchema = SchemaFactory.createForClass(Transfer);
 
 TransferSchema.index({ status: 1, createdAt: 1 });
+// Enforce unique idempotency keys to prevent concurrent duplicate transfers
+TransferSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
