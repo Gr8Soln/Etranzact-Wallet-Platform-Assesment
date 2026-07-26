@@ -2,51 +2,57 @@
 
 ## 1. What issues did you find?
 
-- **Transfer Race Condition:** `transfer()` used a read-modify-write pattern that allowed balances to drop below zero under high concurrency (Code reading).
-- **MongoDB Deadlocks:** Bidirectional concurrent transfers between two users would cross-lock the database due to a lack of deterministic resource ordering (Architectural reasoning).
-- **Cache Pollution:** Redis cache invalidation/updates occurred outside the transactional boundaries, leaving a race window for stale reads (Code reading).
-- **Poison Pill Loop:** The RabbitMQ consumer blindly requeued all errors (`nack(..., true)`), meaning structural errors (e.g. malformed JSON) would block the queue forever (Code reading).
-- **Consumer Overwrites:** The destination wallet credit used manual JS addition (`+= amount`), leading to lost credits during concurrent message processing (Code reading).
-- **Double-Refund Race:** The pending transfer worker fetched stale records into memory without locking them. Horizontally scaled instances would double-refund the same timeout (Code reading).
-- **Memory Leak & CPU Thrashing:** `WalletEventsWorker` registered infinite dynamic event listeners and executed wasteful polling queries every 10 seconds (Code reading).
-- **Dashboard Memory Bloat:** The dashboard fetched all historical transactions into Node.js memory instead of using DB aggregations (Code reading).
-- **Missing Schema Indexes:** The consumer lacked a compound index for `{ _id: 1, status: 1 }`, causing O(N) lookup degradation (Architectural reasoning).
+- **Transfer & Withdrawal Race Conditions** ✅ *(fixed)*: `transfer()` and `withdraw()` originally relied on read-modify-write patterns (`findById` → update in JavaScript → `.save()`) without atomic operators or database locks. Under concurrent operations, this allowed balances to drop below zero and caused lost updates. Fixed by replacing manual mutations with atomic `$inc` updates guarded by `{ balance: { $gte: amount } }`.
+- **MongoDB Transaction Deadlocks** ✅ *(fixed)*: Simultaneous bidirectional transfers between two wallets (e.g. A → B and B → A) caused database deadlocks. Fixed by enforcing a deterministic lock acquisition sequence (`[fromId, toId].sort()`) prior to executing transaction operations.
+- **Transfer Idempotency & Duplicate Side Effects** ✅ *(fixed)*: Lack of unique constraints on `idempotencyKey` allowed duplicate transfers to execute. Fixed by adding a unique sparse index on `Transfer.idempotencyKey` and gracefully returning existing records on collision.
+- **Consumer Overwrites & Redelivery Duplication** ✅ *(fixed)*: RabbitMQ consumer credited recipient wallets using manual JS math and lacked atomicity. Redelivered messages could credit accounts multiple times. Fixed using atomic `$inc` operations and atomic status updates (`status: PENDING` → `COMPLETED`).
+- **Poison Pill Loop in Event Consumer** ✅ *(fixed)*: The RabbitMQ message handler blindly requeued all errors (`nack(..., true)`), creating infinite processing loops for malformed or unresolvable payloads. Fixed by distinguishing unrecoverable structural errors (nacked without requeue) from transient infrastructure failures.
+- **Double-Refund Race Condition** ✅ *(fixed)*: The pending transfer cleanup worker loaded stale transfers into memory without locking them, enabling horizontally scaled instances to refund the same failed transfer multiple times. Fixed by using an atomic state transition (`status: PENDING` → `FAILED`) as a pessimistic lock before executing refunds.
+- **Memory Leaks & Unbounded Event Listeners** ✅ *(fixed)*: `WalletEventsWorker` registered persistent listeners on every tick without cleanup and suppressed Node leak warnings with `setMaxListeners(0)`. Fixed by replacing polling loops with native MongoDB Change Streams and Redis Pub/Sub event broadcasting.
+- **Cache Stale Reads & Out-of-Sync Balance** ✅ *(fixed)*: State-modifying operations (`deposit`, `withdraw`, consumer credit) did not update or invalidate Redis cached balances, leading to stale balance responses on `GET /wallets/:id`. Fixed by updating/invalidating Redis entries inside transactional execution flow.
+- **Un-wrapped Deposit Operations** ✅ *(fixed)*: `deposit()` performed wallet updates, transaction creation, and ledger logging as three disconnected operations without session transaction boundaries. Fixed by wrapping the entire deposit sequence in `session.withTransaction()`.
+- **Dashboard N+1 Query & In-Memory Bloat** ✅ *(fixed)*: The wallet dashboard fetched complete transaction histories into application memory and executed individual ledger queries per transaction. Fixed by converting calculation paths to MongoDB aggregations and limiting recent activity fetches.
+- **Missing Schema & Query Indexes** ✅ *(fixed)*: Core queries on `ledger_entries`, `transfers`, and `transactions` lacked supporting indexes, causing full collection scans as data volume expanded. Fixed by adding indexes for `{ _id: 1, status: 1 }`, `{ status: 1, createdAt: -1 }`, `{ walletId: 1, createdAt: -1 }`, and ledger lookups.
+- **NestJS Dependency Injection Missing Providers** ✅ *(fixed)*: `WorkersModule` was missing registrations for `Transaction` model and `LedgerModule`, causing NestJS runtime startup dependency resolution crashes. Fixed by registering `TransactionSchema` and importing `LedgerModule` into `WorkersModule`.
+- **Correlation ID Context Drop** ✅ *(fixed)*: Request correlation IDs were restricted to Express middleware and did not flow to outbox events, RabbitMQ messages, or consumer logs. Fixed by propagating correlation IDs across HTTP interceptors, exceptions, outbox entries, and message headers.
 
 ## 2. What did you prioritize, and why?
 
-1. **Financial Integrity (Severe):** Fixing the negative balance race conditions, deadlocks, consumer overwrites, and double refunds. If a ledger loses money, the company dies.
-2. **System Stability (High):** Resolving the RabbitMQ poison pill loop and the Node.js memory leak. These cause catastrophic system-wide outages (OOMs and blocked queues).
-3. **Performance (Medium):** Replacing DB polling with Change Streams and optimizing the dashboard query to ensure the system actually scales under load.
+1. **Financial Accuracy & Data Integrity (Highest)**: Resolved negative balance race conditions, database deadlocks, double-refunds, and missing deposit transaction boundaries. Preventing monetary discrepancies and lost ledger updates is critical.
+2. **NestJS Boot & Service Stability (High)**: Resolved NestJS DI registration failures, memory leaks in event workers, and RabbitMQ poison pill loops to ensure the application starts up reliably and avoids OOM or queue stall outages.
+3. **Cache & Read Consistency (Medium)**: Ensured Redis cache operations strictly align with database transaction states to prevent stale balance reads.
+4. **Performance & Indexing (Medium)**: Replaced unindexed full-collection scans and N+1 memory loading with MongoDB aggregations and schema indexes.
 
 ## 3. How did you handle concurrency?
 
-- **API Transfers (Deadlock Prevention):** Implemented a deterministic lock hierarchy by sorting wallet IDs (`[fromWalletId, toWalletId].sort()`) before fetching. We replaced manual math with atomic `$inc` operators constrained by `$gte` to absolutely guarantee no negative balances under any interleaving.
-- **Queue Consumers (Idempotency):** Pushed the state idempotency check (`status: PENDING` -> `COMPLETED`) directly into a `findOneAndUpdate` query to guarantee atomicity against simultaneous duplicate RabbitMQ deliveries.
-- **Workers (Pessimistic Locks):** Used the transfer document's `status` field as an inherent pessimistic lock during refunds to prevent multi-node double refunds.
+- **Deterministic Locking**: Deadlocks during cross-wallet transfers are prevented by sorting wallet ObjectIDs alphabetically prior to acquiring document locks in MongoDB sessions.
+- **Atomic Database Operations**: Replaced read-modify-write patterns with atomic `$inc` operators and conditional filters (`balance: { $gte: amount }`) to guarantee balance invariants at the database level.
+- **Consumer State Guards**: Event consumption uses atomic `findOneAndUpdate` state transitions (`PENDING` → `COMPLETED`) so duplicate RabbitMQ message deliveries are safely ignored.
+- **Worker Lock Transitions**: The pending transfer sweeper claims transfers atomically via `PENDING` → `FAILED` state transitions before issuing sender refunds, preventing multi-instance double refunds.
 
 ## 4. How did you ensure data consistency?
 
-- **Cache Continuity:** Encapsulated all Redis `setCachedBalance` calls strictly inside the MongoDB `session.withTransaction()` boundaries. This guarantees that concurrent reads cannot fetch and cache a stale pre-commit state after the transaction commits but before the cache is invalidated.
-- **Queue Integrity:** Differentiated fatal structural errors (dropped) from transient infrastructure errors (requeued) in the RabbitMQ `nack` block to maintain exact-once processing intent without stalling the queue.
+- **Transactional Outbox & Operations**: Money movements, ledger recordings, transaction history creation, and event outbox enqueues are executed within MongoDB `session.withTransaction()` boundaries to guarantee atomicity.
+- **Cache Synchronization**: Balance updates are reflected in Redis within the transactional lifecycle to prevent cache pollution and stale read windows.
+- **Error Classification**: Queue handlers inspect error types to reject unrecoverable malformed payloads while preserving transient infrastructure retries.
 
 ## 5. Trade-offs
 
-- **Redis Inside Transactions:** Writing to Redis inside a MongoDB transaction briefly holds the database lock open for a network roundtrip. I chose this conservative fix over a complex Change Data Capture (CDC) cache-invalidation pipeline to prioritize absolute consistency without over-engineering the infrastructure.
-- **Dropped Messages vs. DLQ:** Currently, fatal errors in the consumer are dropped (`requeue: false`). This is simpler than setting up a Dead Letter Queue (DLQ), but sacrifices automated auditing of those failed events.
+- **Synchronous Redis Updates**: Performing Redis cache updates within transaction logic introduces minor network overhead during writes, prioritized over eventual consistency to guarantee immediate read-after-write accuracy.
+- **Outbox Relay Latency**: Staging events to an outbox table before broker dispatch adds slight delivery latency (~polling interval), traded off against direct publishing to eliminate lost or duplicated event side-effects.
 
 ## 6. Remaining technical debt
 
-- **Input Validation:** The codebase currently accepts any numeric `amount`. Without strict validation, floating-point decimals or negative numbers could bypass higher-level logic.
-- **Outbox Publisher Guarantees:** The RabbitMQ publisher does not aggressively verify broker delivery confirmations before advancing outbox statuses, technically leaving a micro-window for message loss if the broker crashes mid-flight.
-- **Soft Deletes:** The schema lacks soft deletes (`deletedAt`), which threatens the referential integrity of historical ledger entries if a user account is deleted.
+- **Strict Value Validation**: Ensure all monetary inputs are validated as positive integer minor units (cents) to avoid floating-point representation artifacts.
+- **Dead Letter Queue (DLQ) Setup**: Extend RabbitMQ topology with explicit DLQ exchanges to retain dropped poison-pill messages for manual inspection.
 
 ## 7. What would you improve with another day?
 
-- **Strict DTO Validation:** Implement Joi/Class-Validator constraints enforcing all amounts as strictly positive minor integers (cents) to prevent floating-point math errors.
-- **Dead Letter Queue (DLQ):** Configure a formal DLQ exchange in RabbitMQ so that structurally poisoned messages are preserved for DevOps inspection instead of being dropped.
-- **CDC Cache Invalidation:** Transition cache invalidation to an asynchronous MongoDB Change Stream pipeline (e.g., Debezium) to entirely decouple Redis latency from MongoDB transaction locks.
+- **Formal DLQ Pipeline**: Implement full Dead Letter Queues and admin re-queue tooling for failed domain events.
+- **Distributed Leader Election for Cron Workers**: Add distributed locks (e.g. Redlock or Mongo-based leader election) to guarantee single-worker execution across horizontally scaled pods.
+- **Automated Reconciliation**: Schedule background worker checks against `LedgerService.aggregateNetByWallet()` to automatically flag any balance discrepancies.
 
 ## 8. Assumptions
 
-- **Replica Set:** Assumed MongoDB is running as a Replica Set, which is a hard prerequisite for multi-document ACID transactions to function.
-- **Horizontal Scale:** Assumed the application is intended to be deployed across multiple Kubernetes pods/instances, which drove the necessity of stripping the local `EventEmitter` and fixing the sweeper locks.
+- **MongoDB Replica Set**: Multi-document transactions require MongoDB to run in a replica set configuration (`rs0`).
+- **Containerized Stack**: Services interact over Docker container networking (`mongo`, `redis`, `rabbitmq`).
