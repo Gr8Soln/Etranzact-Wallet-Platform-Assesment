@@ -4,6 +4,8 @@ import * as amqp from 'amqp-connection-manager';
 import { ChannelWrapper } from 'amqp-connection-manager';
 import { ConfirmChannel } from 'amqplib';
 
+import { v4 as uuidv4 } from 'uuid';
+
 @Injectable()
 export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RabbitMQService.name);
@@ -31,6 +33,7 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
       json: true,
       setup: (channel: ConfirmChannel) =>
         Promise.all([
+          channel.prefetch(10),
           channel.assertExchange(this.exchange, 'topic', { durable: true }),
           channel.assertExchange(dlxName, 'topic', { durable: true }),
           channel.assertQueue(this.transferQueue, {
@@ -45,10 +48,12 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
   }
 
   async publish(routingKey: string, payload: Record<string, unknown>): Promise<void> {
-    await this.channelWrapper.publish(this.exchange, routingKey, payload, {
+    const messageId = (payload.messageId as string) || uuidv4();
+    await this.channelWrapper.publish(this.exchange, routingKey, { ...payload, messageId }, {
       persistent: true,
+      messageId,
     });
-    this.logger.log(`Published event ${routingKey}`);
+    this.logger.log(`Published event ${routingKey} (messageId: ${messageId})`);
   }
 
   getChannelWrapper(): ChannelWrapper {

@@ -4,6 +4,14 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
+  const jwtSecret = process.env.JWT_SECRET || 'change-me-in-production';
+  if (process.env.NODE_ENV === 'production') {
+    if (!jwtSecret || jwtSecret === 'change-me-in-production' || jwtSecret.length < 32) {
+      Logger.error('FATAL: A secure JWT_SECRET (at least 32 characters) must be configured in production mode.', 'Bootstrap');
+      process.exit(1);
+    }
+  }
+
   const app = await NestFactory.create(AppModule);
 
   app.enableCors();

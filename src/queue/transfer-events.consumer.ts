@@ -9,11 +9,14 @@ import { Transfer, TransferDocument, TransferStatus } from '../wallets/schemas/t
 import { Wallet, WalletDocument } from '../wallets/schemas/wallet.schema';
 import { RabbitMQService } from './rabbitmq.service';
 
+import { InboxMessage, InboxMessageDocument } from './schemas/inbox-message.schema';
+
 export interface TransferInitiatedEvent {
   transferId: string;
   fromWalletId: string;
   toWalletId: string;
   amount: number;
+  messageId?: string;
 }
 
 @Injectable()
@@ -26,6 +29,7 @@ export class TransferEventsConsumer implements OnModuleInit {
     @InjectModel(Transfer.name) private readonly transferModel: Model<TransferDocument>,
     @InjectModel(Wallet.name) private readonly walletModel: Model<WalletDocument>,
     @InjectModel(Transaction.name) private readonly transactionModel: Model<TransactionDocument>,
+    @InjectModel(InboxMessage.name) private readonly inboxMessageModel: Model<InboxMessageDocument>,
     private readonly ledgerService: LedgerService,
     private readonly redisService: RedisService,
   ) {}
@@ -43,6 +47,9 @@ export class TransferEventsConsumer implements OnModuleInit {
 
     try {
       const event: TransferInitiatedEvent = JSON.parse(message.content.toString());
+      if (message.properties?.messageId && !event.messageId) {
+        event.messageId = message.properties.messageId;
+      }
       await this.completeTransfer(event);
       channel.ack(message);
     } catch (error: any) {
@@ -68,6 +75,18 @@ export class TransferEventsConsumer implements OnModuleInit {
 
     try {
       await session.withTransaction(async () => {
+        if (event.messageId) {
+          try {
+            await this.inboxMessageModel.create([{ messageId: event.messageId }], { session });
+          } catch (err: any) {
+            if (err.code === 11000) {
+              isAlreadyCompleted = true;
+              return;
+            }
+            throw err;
+          }
+        }
+
         const transfer = await this.transferModel.findOneAndUpdate(
           { _id: event.transferId, status: TransferStatus.PENDING },
           { status: TransferStatus.COMPLETED },

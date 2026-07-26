@@ -9,6 +9,8 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 import configuration from './config/configuration';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 import { HealthModule } from './health/health.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { OutboxModule } from './outbox/outbox.module';
@@ -28,6 +30,12 @@ import { WorkersModule } from './workers/workers.module';
         uri: configService.get<string>('mongodb.uri'),
       }),
     }),
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60000,
+        limit: 100,
+      },
+    ]),
     RedisModule,
     AuthModule,
     HealthModule,
@@ -40,6 +48,7 @@ import { WorkersModule } from './workers/workers.module';
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: UserThrottlerGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
   ],

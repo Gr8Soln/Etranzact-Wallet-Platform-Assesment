@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsISO4217, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class CreateWalletDto {
   @ApiProperty({ example: 'user-1001' })
@@ -15,5 +15,6 @@ export class CreateWalletDto {
   @ApiPropertyOptional({ example: 'GHS', default: 'GHS' })
   @IsOptional()
   @IsString()
+  @IsISO4217()
   currency?: string;
 }

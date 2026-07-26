@@ -29,6 +29,9 @@ export class Transfer {
   @Prop()
   failureReason?: string;
 
+  @Prop()
+  lastSweptAt?: Date;
+
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -40,6 +43,7 @@ TransferSchema.index({ _id: 1, status: 1 });
 
 // Updated Sort Path: Aligned with descending analytics and sweep queries
 TransferSchema.index({ status: 1, createdAt: -1 });
+TransferSchema.index({ status: 1, lastSweptAt: 1 });
 
 // Enforce unique idempotency keys to prevent concurrent duplicate transfers
 TransferSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });

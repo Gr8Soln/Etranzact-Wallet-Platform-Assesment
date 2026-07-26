@@ -4,6 +4,7 @@ import { LedgerModule } from '../ledger/ledger.module';
 import { Transaction, TransactionSchema } from '../transactions/schemas/transaction.schema';
 import { Transfer, TransferSchema } from '../wallets/schemas/transfer.schema';
 import { Wallet, WalletSchema } from '../wallets/schemas/wallet.schema';
+import { InboxMessage, InboxMessageSchema } from './schemas/inbox-message.schema';
 import { RabbitMQService } from './rabbitmq.service';
 import { TransferEventsConsumer } from './transfer-events.consumer';
 
@@ -13,6 +14,7 @@ import { TransferEventsConsumer } from './transfer-events.consumer';
       { name: Transfer.name, schema: TransferSchema },
       { name: Wallet.name, schema: WalletSchema },
       { name: Transaction.name, schema: TransactionSchema },
+      { name: InboxMessage.name, schema: InboxMessageSchema },
     ]),
     LedgerModule,
   ],

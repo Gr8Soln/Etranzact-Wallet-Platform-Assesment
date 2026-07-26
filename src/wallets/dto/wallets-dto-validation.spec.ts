@@ -17,8 +17,15 @@ describe('Wallet DTO validation', () => {
       const errors = await validate(dto);
       expect(errors.length).toBeGreaterThan(0);
       expect(errors.map((e) => e.property)).toEqual(
-        expect.arrayContaining(['userId', 'ownerName']),
-      );
+    it('rejects an invalid currency code', async () => {
+      const dto = plainToInstance(CreateWalletDto, { userId: 'user-1', ownerName: 'Ama Owusu', currency: 'INVALID' });
+      const errors = await validate(dto);
+      expect(errors.some((e) => e.property === 'currency')).toBe(true);
+    });
+
+    it('accepts a valid ISO 4217 currency code', async () => {
+      const dto = plainToInstance(CreateWalletDto, { userId: 'user-1', ownerName: 'Ama Owusu', currency: 'USD' });
+      expect(await validate(dto)).toHaveLength(0);
     });
   });
 
@@ -33,6 +40,12 @@ describe('Wallet DTO validation', () => {
         expect((await validate(plainToInstance(DepositDto, payload))).length).toBeGreaterThan(0);
         expect((await validate(plainToInstance(WithdrawDto, payload))).length).toBeGreaterThan(0);
       }
+    });
+
+    it('rejects an amount exceeding MAX_SAFE_INTEGER', async () => {
+      const hugeAmount = Number.MAX_SAFE_INTEGER + 1000;
+      expect((await validate(plainToInstance(DepositDto, { amount: hugeAmount }))).length).toBeGreaterThan(0);
+      expect((await validate(plainToInstance(WithdrawDto, { amount: hugeAmount }))).length).toBeGreaterThan(0);
     });
   });
 
@@ -56,6 +69,12 @@ describe('Wallet DTO validation', () => {
 
     it('rejects a non-positive amount', async () => {
       const dto = plainToInstance(TransferDto, { ...validPayload, amount: -10 });
+      const errors = await validate(dto);
+      expect(errors.some((e) => e.property === 'amount')).toBe(true);
+    });
+
+    it('rejects an amount exceeding MAX_SAFE_INTEGER', async () => {
+      const dto = plainToInstance(TransferDto, { ...validPayload, amount: Number.MAX_SAFE_INTEGER + 1000 });
       const errors = await validate(dto);
       expect(errors.some((e) => e.property === 'amount')).toBe(true);
     });

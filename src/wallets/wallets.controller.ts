@@ -1,5 +1,7 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+import { LedgerEntryDirection } from '../ledger/schemas/ledger-entry.schema';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { DepositDto } from './dto/deposit.dto';
 import { TransferDto } from './dto/transfer.dto';
@@ -18,6 +20,7 @@ export class WalletsController {
     return this.walletsService.createWallet(dto);
   }
 
+  @Throttle({ default: { limit: 15, ttl: 10000 } })
   @Post('transfer')
   transfer(@Body() dto: TransferDto) {
     return this.walletsService.transfer(dto);
@@ -46,5 +49,20 @@ export class WalletsController {
   @Get(':id/reconcile')
   reconcile(@Param('id') id: string) {
     return this.walletsService.reconcile(id);
+  }
+
+  @Get(':id/audit')
+  audit(
+    @Param('id') id: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('direction') direction?: LedgerEntryDirection,
+  ) {
+    return this.walletsService.getAuditTrail(
+      id,
+      page ? Number(page) : 1,
+      limit ? Number(limit) : 20,
+      direction,
+    );
   }
 }

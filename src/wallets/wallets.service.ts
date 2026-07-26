@@ -218,6 +218,10 @@ export class WalletsService {
           throw new BadRequestException('Insufficient balance');
         }
 
+        if (fromWallet.currency !== toWallet.currency) {
+          throw new BadRequestException(`Currency mismatch between wallets (${fromWallet.currency} vs ${toWallet.currency})`);
+        }
+
         [transfer] = await this.transferModel.create(
           [
             {
@@ -348,5 +352,13 @@ export class WalletsService {
       difference: computedBalance - wallet.balance,
       inSync: computedBalance === wallet.balance,
     };
+  }
+
+  async getAuditTrail(id: string, page?: number, limit?: number, direction?: any) {
+    const wallet = await this.walletModel.findById(id);
+    if (!wallet) {
+      throw new NotFoundException(`Wallet ${id} not found`);
+    }
+    return this.ledgerService.getAuditTrail(id, page, limit, direction);
   }
 }

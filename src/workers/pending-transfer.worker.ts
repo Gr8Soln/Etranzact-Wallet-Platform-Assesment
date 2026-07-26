@@ -32,8 +32,13 @@ export class PendingTransferWorker implements OnModuleInit, OnModuleDestroy {
 
     // Fetch raw stale IDs only to minimize memory overhead
     const staleTransfers = await this.transferModel
-      .find({ status: TransferStatus.PENDING, createdAt: { $lt: cutoff } })
+      .find({
+        status: TransferStatus.PENDING,
+        createdAt: { $lt: cutoff },
+        $or: [{ lastSweptAt: { $exists: false } }, { lastSweptAt: { $lt: cutoff } }],
+      })
       .select('_id fromWalletId amount')
+      .limit(100)
       .lean()
       .exec();
 
@@ -47,7 +52,8 @@ export class PendingTransferWorker implements OnModuleInit, OnModuleDestroy {
             { _id: stale._id, status: TransferStatus.PENDING },
             { 
               status: TransferStatus.FAILED, 
-              failureReason: `Transfer timed out after ${timeoutMs}ms in PENDING state` 
+              failureReason: `Transfer timed out after ${timeoutMs}ms in PENDING state`,
+              lastSweptAt: new Date(),
             },
             { new: true, session }
           );

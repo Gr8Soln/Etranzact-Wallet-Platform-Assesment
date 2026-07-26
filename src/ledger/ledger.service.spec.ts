@@ -78,4 +78,20 @@ describe('LedgerService', () => {
 
     expect(balance).toBe(410);
   });
+
+  it('fetches paginated audit trail entries', async () => {
+    const items = [{ id: '1' }, { id: '2' }];
+    const execMock = jest.fn().mockResolvedValue(items);
+    ledgerEntryModel.find = jest.fn().mockReturnValue({
+      sort: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      exec: execMock,
+    });
+    ledgerEntryModel.countDocuments = jest.fn().mockResolvedValue(2);
+
+    const result = await service.getAuditTrail('wallet-1', 1, 10, LedgerEntryDirection.CREDIT);
+
+    expect(result).toEqual({ items, total: 2, page: 1, limit: 10 });
+  });
 });

@@ -9,11 +9,14 @@ import { Wallet } from '../wallets/schemas/wallet.schema';
 import { RabbitMQService } from './rabbitmq.service';
 import { TransferEventsConsumer } from './transfer-events.consumer';
 
+import { InboxMessage } from './schemas/inbox-message.schema';
+
 describe('TransferEventsConsumer', () => {
   let consumer: TransferEventsConsumer;
   let transferModel: any;
   let walletModel: any;
   let transactionModel: any;
+  let inboxMessageModel: any;
   let ledgerService: any;
   let mockSession: any;
   let redisService: any;
@@ -22,6 +25,7 @@ describe('TransferEventsConsumer', () => {
     transferModel = { findById: jest.fn(), findOneAndUpdate: jest.fn() };
     walletModel = { findById: jest.fn(), findOneAndUpdate: jest.fn() };
     transactionModel = { create: jest.fn() };
+    inboxMessageModel = { create: jest.fn() };
     ledgerService = { recordCredit: jest.fn() };
     mockSession = {
       withTransaction: jest.fn(async (fn: () => Promise<unknown>) => fn()),
@@ -40,6 +44,7 @@ describe('TransferEventsConsumer', () => {
         { provide: getModelToken(Transfer.name), useValue: transferModel },
         { provide: getModelToken(Wallet.name), useValue: walletModel },
         { provide: getModelToken(Transaction.name), useValue: transactionModel },
+        { provide: getModelToken(InboxMessage.name), useValue: inboxMessageModel },
         { provide: LedgerService, useValue: ledgerService },
         { provide: RedisService, useValue: redisService },
       ],

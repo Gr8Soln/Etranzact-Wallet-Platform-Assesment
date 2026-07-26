@@ -262,9 +262,9 @@ describe('WalletsService', () => {
     const fromId = new Types.ObjectId();
     const toId = new Types.ObjectId();
 
-    function mockWallets(fromBalance: number) {
-      const fromWallet = { _id: fromId, balance: fromBalance, version: 0, save: jest.fn() };
-      const toWallet = { _id: toId, balance: 0 };
+    function mockWallets(fromBalance: number, fromCurrency = 'GHS', toCurrency = 'GHS') {
+      const fromWallet = { _id: fromId, balance: fromBalance, currency: fromCurrency, version: 0, save: jest.fn() };
+      const toWallet = { _id: toId, balance: 0, currency: toCurrency };
       walletModel.findById.mockImplementation((id: unknown) => {
         if (String(id) === String(fromId)) return Promise.resolve(fromWallet);
         if (String(id) === String(toId)) return Promise.resolve(toWallet);
@@ -289,6 +289,17 @@ describe('WalletsService', () => {
         service.transfer({
           fromWalletId: fromId.toString(),
           toWalletId: fromId.toString(),
+          amount: 10,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects transfers between wallets with different currencies', async () => {
+      mockWallets(100, 'GHS', 'USD');
+      await expect(
+        service.transfer({
+          fromWalletId: fromId.toString(),
+          toWalletId: toId.toString(),
           amount: 10,
         }),
       ).rejects.toThrow(BadRequestException);

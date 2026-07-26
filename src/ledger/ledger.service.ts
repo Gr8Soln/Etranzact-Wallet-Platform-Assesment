@@ -109,4 +109,28 @@ export class LedgerService {
 
     return result?.net ?? 0;
   }
+
+  async getAuditTrail(
+    walletId: string,
+    page: number = 1,
+    limit: number = 20,
+    direction?: LedgerEntryDirection,
+  ) {
+    const filter: Record<string, unknown> = { walletId };
+    if (direction) {
+      filter.direction = direction;
+    }
+
+    const [items, total] = await Promise.all([
+      this.ledgerEntryModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .exec(),
+      this.ledgerEntryModel.countDocuments(filter),
+    ]);
+
+    return { items, total, page, limit };
+  }
 }
