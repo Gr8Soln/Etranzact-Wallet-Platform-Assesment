@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.github
+.gitignore
+Dockerfile
+docker-compose.yml
+.env
+.env.*
+coverage
+.nest
+.pnpm-store
+.vscode
+.idea

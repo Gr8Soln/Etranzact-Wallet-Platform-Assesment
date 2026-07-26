@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { getCorrelationId } from '../async-context';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -24,8 +25,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
       ? exception.getResponse()
       : { message: 'Internal server error' };
 
+    const cid = getCorrelationId() ?? '-';
+
     this.logger.error(
-      `${request.method} ${request.url} -> ${status} ${
+      `[${cid}] ${request.method} ${request.url} -> ${status} ${
         exception instanceof Error ? exception.message : JSON.stringify(exception)
       }`,
       exception instanceof Error ? exception.stack : undefined,

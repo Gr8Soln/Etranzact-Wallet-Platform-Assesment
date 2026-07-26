@@ -34,3 +34,12 @@ export class Transfer {
 }
 
 export const TransferSchema = SchemaFactory.createForClass(Transfer);
+
+// Missing Query Route Index: Ensures ultra-fast consumer idempotency locks
+TransferSchema.index({ _id: 1, status: 1 });
+
+// Updated Sort Path: Aligned with descending analytics and sweep queries
+TransferSchema.index({ status: 1, createdAt: -1 });
+
+// Enforce unique idempotency keys to prevent concurrent duplicate transfers
+TransferSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });

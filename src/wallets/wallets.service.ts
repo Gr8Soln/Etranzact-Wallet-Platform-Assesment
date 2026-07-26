@@ -86,53 +86,101 @@ export class WalletsService {
   }
 
   async deposit(id: string, dto: DepositDto) {
-    const wallet = await this.walletModel.findByIdAndUpdate(
-      id,
-      { $inc: { balance: dto.amount } },
-      { new: true },
-    );
+    const session = await this.connection.startSession();
 
-    if (!wallet) {
-      throw new NotFoundException(`Wallet ${id} not found`);
+    try {
+      let wallet!: WalletDocument;
+      let transaction!: TransactionDocument;
+
+      await session.withTransaction(async () => {
+        // Atomic update without redundant version increment
+        wallet = (await this.walletModel.findByIdAndUpdate(
+          id,
+          { $inc: { balance: dto.amount } },
+          { new: true, session },
+        ))!;
+
+        if (!wallet) {
+          throw new NotFoundException(`Wallet ${id} not found`);
+        }
+
+        transaction = await this.transactionsService.create({
+          walletId: wallet.id,
+          type: TransactionType.DEPOSIT,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+          reference: dto.reference,
+        }, session);
+
+        await this.ledgerService.recordCredit(
+          wallet._id, transaction._id, dto.amount, wallet.balance, session,
+        );
+
+        await this.outboxService.enqueue('wallet.deposited', {
+          walletId: wallet.id,
+          transactionId: transaction.id,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+        }, session);
+        // Cache update INSIDE the transaction boundary to prevent stale reads
+        await this.redisService.setCachedBalance(id, wallet.balance);
+      });
+
+      return wallet;
+    } finally {
+      await session.endSession();
     }
-
-    const transaction = await this.transactionsService.create({
-      walletId: wallet.id,
-      type: TransactionType.DEPOSIT,
-      amount: dto.amount,
-      balanceAfter: wallet.balance,
-      reference: dto.reference,
-    });
-
-    await this.ledgerService.recordCredit(wallet._id, transaction._id, dto.amount, wallet.balance);
-
-    return wallet;
   }
 
   async withdraw(id: string, dto: WithdrawDto) {
-    const wallet = await this.walletModel.findById(id);
-    if (!wallet) {
-      throw new NotFoundException(`Wallet ${id} not found`);
+    const session = await this.connection.startSession();
+
+    try {
+      let wallet!: WalletDocument;
+      let transaction!: TransactionDocument;
+
+      await session.withTransaction(async () => {
+        // Atomic update with $gte check, no redundant version tracking
+        wallet = (await this.walletModel.findOneAndUpdate(
+          { _id: id, balance: { $gte: dto.amount } },
+          { $inc: { balance: -dto.amount } },
+          { new: true, session },
+        ))!;
+
+        if (!wallet) {
+          const exists = await this.walletModel.findById(id, null, { session });
+          if (!exists) {
+            throw new NotFoundException(`Wallet ${id} not found`);
+          }
+          throw new BadRequestException('Insufficient balance');
+        }
+
+        transaction = await this.transactionsService.create({
+          walletId: wallet.id,
+          type: TransactionType.WITHDRAWAL,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+          reference: dto.reference,
+        }, session);
+
+        await this.ledgerService.recordDebit(
+          wallet._id, transaction._id, dto.amount, wallet.balance, session,
+        );
+
+        await this.outboxService.enqueue('wallet.withdrawn', {
+          walletId: wallet.id,
+          transactionId: transaction.id,
+          amount: dto.amount,
+          balanceAfter: wallet.balance,
+        }, session);
+        // Cache update INSIDE the transaction boundary
+        await this.redisService.setCachedBalance(id, wallet.balance);
+      });
+
+      return wallet;
+    } finally {
+      await session.endSession();
     }
-
-    if (wallet.balance < dto.amount) {
-      throw new BadRequestException('Insufficient balance');
-    }
-
-    wallet.balance -= dto.amount;
-    await wallet.save();
-
-    const transaction = await this.transactionsService.create({
-      walletId: wallet.id,
-      type: TransactionType.WITHDRAWAL,
-      amount: dto.amount,
-      balanceAfter: wallet.balance,
-      reference: dto.reference,
-    });
-
-    await this.ledgerService.recordDebit(wallet._id, transaction._id, dto.amount, wallet.balance);
-
-    return wallet;
   }
 
   async transfer(dto: TransferDto) {
@@ -140,24 +188,36 @@ export class WalletsService {
       throw new BadRequestException('Cannot transfer to the same wallet');
     }
 
-    const [fromWallet, toWallet] = await Promise.all([
-      this.walletModel.findById(dto.fromWalletId),
-      this.walletModel.findById(dto.toWalletId),
-    ]);
-
-    if (!fromWallet || !toWallet) {
-      throw new NotFoundException('Wallet not found');
-    }
-
-    if (fromWallet.balance < dto.amount) {
-      throw new BadRequestException('Insufficient balance');
-    }
+    // Idempotency is now enforced by a unique index on the schema
 
     const session = await this.connection.startSession();
     let transfer!: TransferDocument;
 
     try {
       await session.withTransaction(async () => {
+        // Deadlock Prevention: Order wallet IDs to enforce a strict locking hierarchy
+        const sortedIds = [dto.fromWalletId, dto.toWalletId].sort();
+        
+        // Lock both wallets in alphabetical order to prevent cross-locks
+        await this.walletModel.find({ _id: { $in: sortedIds } }).session(session);
+
+        // Now safely perform atomic debit with constraint
+        const fromWallet = await this.walletModel.findOneAndUpdate(
+          { _id: dto.fromWalletId, balance: { $gte: dto.amount } },
+          { $inc: { balance: -dto.amount } },
+          { new: true, session },
+        );
+        const toWallet = await this.walletModel.findById(dto.toWalletId, null, { session });
+
+        if (!toWallet) {
+          throw new NotFoundException('Destination wallet not found');
+        }
+        if (!fromWallet) {
+          const exists = await this.walletModel.findById(dto.fromWalletId, null, { session });
+          if (!exists) throw new NotFoundException('Source wallet not found');
+          throw new BadRequestException('Insufficient balance');
+        }
+
         [transfer] = await this.transferModel.create(
           [
             {
@@ -170,9 +230,6 @@ export class WalletsService {
           ],
           { session },
         );
-
-        fromWallet.balance -= dto.amount;
-        await fromWallet.save({ session });
 
         const [debitTransaction] = await this.transactionModel.create(
           [
@@ -197,13 +254,26 @@ export class WalletsService {
           session,
         );
 
-        await this.rabbitMQService.publish('transfer.initiated', {
-          transferId: transfer._id.toString(),
-          fromWalletId: fromWallet._id.toString(),
-          toWalletId: toWallet._id.toString(),
-          amount: dto.amount,
-        });
+        await this.outboxService.enqueue(
+          'transfer.initiated',
+          {
+            transferId: transfer._id.toString(),
+            fromWalletId: fromWallet._id.toString(),
+            toWalletId: toWallet._id.toString(),
+            amount: dto.amount,
+          },
+          session,
+        );
+        // Update cache strictly inside transaction boundary
+        await this.redisService.setCachedBalance(dto.fromWalletId, fromWallet.balance);
       });
+    } catch (error: any) {
+      if (error.code === 11000 && dto.idempotencyKey) {
+        // Return existing transfer gracefully on duplicate key race
+        const existing = await this.transferModel.findOne({ idempotencyKey: dto.idempotencyKey });
+        if (existing) return existing;
+      }
+      throw error;
     } finally {
       await session.endSession();
     }
@@ -217,36 +287,66 @@ export class WalletsService {
       throw new NotFoundException(`Wallet ${id} not found`);
     }
 
-    const transactions = await this.transactionModel
-      .find({ walletId: id })
-      .sort({ createdAt: -1 })
-      .exec();
+    // Optimize performance by calculating totals via MongoDB aggregation instead of in-memory
+    const [stats] = await this.transactionModel.aggregate([
+      { $match: { walletId: wallet._id } },
+      {
+        $group: {
+          _id: null,
+          totalDeposited: {
+            $sum: {
+              $cond: [{ $in: ['$type', [TransactionType.DEPOSIT, TransactionType.TRANSFER_IN]] }, '$amount', 0],
+            },
+          },
+          totalWithdrawn: {
+            $sum: {
+              $cond: [{ $in: ['$type', [TransactionType.WITHDRAWAL, TransactionType.TRANSFER_OUT]] }, '$amount', 0],
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
 
-    let totalDeposited = 0;
-    let totalWithdrawn = 0;
-    const recentActivity: Array<{
-      transaction: TransactionDocument;
-      entries: LedgerEntryDocument[];
-    }> = [];
+    const recentTxns = await this.transactionModel.find({ walletId: id }).sort({ createdAt: -1 }).limit(10).exec();
+    const recentTxnIds = recentTxns.map((t) => t._id);
+    const recentEntries = await this.ledgerEntryModel.find({ transactionId: { $in: recentTxnIds } }).exec();
 
-    for (const txn of transactions) {
-      const entries = await this.ledgerEntryModel.find({ transactionId: txn._id }).exec();
-
-      if (txn.type === TransactionType.DEPOSIT || txn.type === TransactionType.TRANSFER_IN) {
-        totalDeposited += txn.amount;
-      } else {
-        totalWithdrawn += txn.amount;
-      }
-
-      recentActivity.push({ transaction: txn, entries });
+    const entriesByTxnId = new Map<string, LedgerEntryDocument[]>();
+    for (const entry of recentEntries) {
+      const key = entry.transactionId.toString();
+      if (!entriesByTxnId.has(key)) entriesByTxnId.set(key, []);
+      entriesByTxnId.get(key)!.push(entry);
     }
+
+    const recentActivity = recentTxns.map((transaction) => ({
+      transaction,
+      entries: entriesByTxnId.get(transaction._id.toString()) ?? [],
+    }));
 
     return {
       wallet,
-      totalDeposited,
-      totalWithdrawn,
-      transactionCount: transactions.length,
-      recentActivity: recentActivity.slice(0, 10),
+      totalDeposited: stats?.totalDeposited ?? 0,
+      totalWithdrawn: stats?.totalWithdrawn ?? 0,
+      transactionCount: stats?.count ?? 0,
+      recentActivity,
+    };
+  }
+
+  async reconcile(id: string) {
+    const wallet = await this.walletModel.findById(id);
+    if (!wallet) {
+      throw new NotFoundException(`Wallet ${id} not found`);
+    }
+
+    const computedBalance = await this.ledgerService.aggregateNetByWallet(id);
+
+    return {
+      walletId: wallet._id.toString(),
+      recordedBalance: wallet.balance,
+      computedBalance,
+      difference: computedBalance - wallet.balance,
+      inSync: computedBalance === wallet.balance,
     };
   }
 }
