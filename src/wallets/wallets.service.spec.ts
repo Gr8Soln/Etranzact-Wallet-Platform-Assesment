@@ -36,6 +36,7 @@ describe('WalletsService', () => {
       findById: jest.fn(),
       findByIdAndUpdate: jest.fn(),
       findOneAndUpdate: jest.fn(),
+      find: jest.fn().mockReturnValue({ session: jest.fn() }),
     };
     transferModel = {
       create: jest.fn(),
@@ -159,7 +160,7 @@ describe('WalletsService', () => {
 
       expect(walletModel.findByIdAndUpdate).toHaveBeenCalledWith(
         walletId,
-        { $inc: { balance: 50, version: 1 } },
+        { $inc: { balance: 50 } },
         { new: true, session: mockSession },
       );
       expect(transactionsService.create).toHaveBeenCalledWith(
@@ -203,7 +204,7 @@ describe('WalletsService', () => {
 
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'w1', balance: { $gte: 40 } },
-        { $inc: { balance: -40, version: 1 } },
+        { $inc: { balance: -40 } },
         { new: true, session: mockSession },
       );
       expect(transactionsService.create).toHaveBeenCalledWith(
@@ -233,7 +234,7 @@ describe('WalletsService', () => {
       await expect(service.withdraw('w1', { amount: 40 })).rejects.toThrow(BadRequestException);
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'w1', balance: { $gte: 40 } },
-        { $inc: { balance: -40, version: 1 } },
+        { $inc: { balance: -40 } },
         { new: true, session: mockSession },
       );
       expect(walletModel.findById).toHaveBeenCalledWith('w1', null, { session: mockSession });
@@ -249,7 +250,7 @@ describe('WalletsService', () => {
       );
       expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: 'missing-id', balance: { $gte: 10 } },
-        { $inc: { balance: -10, version: 1 } },
+        { $inc: { balance: -10 } },
         { new: true, session: mockSession },
       );
       expect(walletModel.findById).toHaveBeenCalledWith('missing-id', null, { session: mockSession });

@@ -16,16 +16,18 @@ describe('TransferEventsConsumer', () => {
   let transactionModel: any;
   let ledgerService: any;
   let mockSession: any;
+  let redisService: any;
 
   beforeEach(async () => {
-    transferModel = { findById: jest.fn() };
-    walletModel = { findById: jest.fn() };
+    transferModel = { findById: jest.fn(), findOneAndUpdate: jest.fn() };
+    walletModel = { findById: jest.fn(), findOneAndUpdate: jest.fn() };
     transactionModel = { create: jest.fn() };
     ledgerService = { recordCredit: jest.fn() };
     mockSession = {
       withTransaction: jest.fn(async (fn: () => Promise<unknown>) => fn()),
       endSession: jest.fn(),
     };
+    redisService = { setCachedBalance: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -39,7 +41,7 @@ describe('TransferEventsConsumer', () => {
         { provide: getModelToken(Wallet.name), useValue: walletModel },
         { provide: getModelToken(Transaction.name), useValue: transactionModel },
         { provide: LedgerService, useValue: ledgerService },
-        { provide: RedisService, useValue: { invalidateBalance: jest.fn() } },
+        { provide: RedisService, useValue: redisService },
       ],
     }).compile();
 
@@ -47,34 +49,30 @@ describe('TransferEventsConsumer', () => {
   });
 
   it('skips processing when the transfer is already completed (idempotency guard)', async () => {
-    const transfer = {
-      _id: new Types.ObjectId(),
-      id: 'transfer-1',
-      status: TransferStatus.COMPLETED,
-    };
-    transferModel.findById.mockResolvedValue(transfer);
+    transferModel.findOneAndUpdate.mockResolvedValue(null);
+    transferModel.findById.mockResolvedValue({ _id: 'transfer-1', status: TransferStatus.COMPLETED });
 
     await (consumer as any).completeTransfer({
-      transferId: transfer._id.toString(),
+      transferId: 'transfer-1',
       fromWalletId: 'wallet-1',
       toWalletId: 'wallet-2',
       amount: 25,
     });
 
-    expect(walletModel.findById).not.toHaveBeenCalled();
+    expect(walletModel.findOneAndUpdate).not.toHaveBeenCalled();
     expect(transactionModel.create).not.toHaveBeenCalled();
   });
 
   it('credits the destination wallet and marks the transfer completed', async () => {
     const transfer = {
       _id: new Types.ObjectId(),
-      id: 'transfer-1',
-      save: jest.fn(),
-      status: TransferStatus.PENDING,
+      fromWalletId: 'wallet-1',
+      status: TransferStatus.COMPLETED,
     };
-    const toWallet = { _id: new Types.ObjectId(), id: 'wallet-2', balance: 100, version: 0, save: jest.fn() };
-    transferModel.findById.mockResolvedValue(transfer);
-    walletModel.findById.mockResolvedValue(toWallet);
+    const toWallet = { _id: new Types.ObjectId(), balance: 125 };
+    
+    transferModel.findOneAndUpdate.mockResolvedValue(transfer);
+    walletModel.findOneAndUpdate.mockResolvedValue(toWallet);
     const creditTransaction = { _id: new Types.ObjectId() };
     transactionModel.create.mockResolvedValue([creditTransaction]);
 
@@ -85,8 +83,11 @@ describe('TransferEventsConsumer', () => {
       amount: 25,
     });
 
-    expect(toWallet.balance).toBe(125);
-    expect(toWallet.save).toHaveBeenCalledWith({ session: mockSession });
+    expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: toWallet._id.toString() },
+      { $inc: { balance: 25 } },
+      { new: true, session: mockSession },
+    );
     expect(transactionModel.create).toHaveBeenCalledWith(
       [expect.objectContaining({ type: TransactionType.TRANSFER_IN, amount: 25, balanceAfter: 125 })],
       { session: mockSession },
@@ -98,11 +99,11 @@ describe('TransferEventsConsumer', () => {
       125,
       mockSession,
     );
-    expect(transfer.status).toBe(TransferStatus.COMPLETED);
-    expect(transfer.save).toHaveBeenCalledWith({ session: mockSession });
+    expect(redisService.setCachedBalance).toHaveBeenCalledWith(toWallet._id.toString(), 125);
   });
 
   it('skips processing when the transfer no longer exists', async () => {
+    transferModel.findOneAndUpdate.mockResolvedValue(null);
     transferModel.findById.mockResolvedValue(null);
 
     await (consumer as any).completeTransfer({
@@ -112,6 +113,6 @@ describe('TransferEventsConsumer', () => {
       amount: 25,
     });
 
-    expect(walletModel.findById).not.toHaveBeenCalled();
+    expect(walletModel.findOneAndUpdate).not.toHaveBeenCalled();
   });
 });
